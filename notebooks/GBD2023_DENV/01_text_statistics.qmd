@@ -1,0 +1,61 @@
+---
+title: "In-Text Statistics"
+author: "Your Name"
+date: today
+format:
+  html:
+    code-fold: false
+    toc: true
+---
+
+## Setup
+
+```{python}
+import os
+from pathlib import Path
+
+# Define paths
+PROJECT_ROOT = Path.cwd().parents[2]
+MANUSCRIPT_DIR = PROJECT_ROOT / "src/idd_manuscripts/GBD2023_DENV"
+DATA_DIR = '/mnt/team/idd/pub/manuscripts/GBD2023_DENV/data'
+data_date = "2025_09_30"
+data_date_dir = f'{DATA_DIR}/{data_date}'
+
+# Data paths
+modeling_hierarchy_2023_path = f"{data_date_dir}/modeling_hierarchy_2023.parquet"
+age_metadata_path = f"{data_date_dir}/age_metadata.parquet"
+population_path = f"{data_date_dir}/population.parquet"
+all_CD_results_path = f"{data_date_dir}/all_CD_results.parquet"
+dengue_sequelae_results_path = f"{data_date_dir}/dengue_sequelae_results.parquet"
+aa_results_path = f"{data_date_dir}/aa_results.parquet"
+as_results_path = f"{data_date_dir}/as_results.parquet"
+denv_2023_global_daly_draws_path = f"{data_date_dir}/denv_2023_global_daly_draws.parquet"
+denv_2023_global_yll_draws_path = f"{data_date_dir}/denv_2023_global_yll_draws.parquet"
+denv_2023_global_yld_draws_path = f"{data_date_dir}/denv_2023_global_yld_draws.parquet"
+denv_2023_global_deaths_draws_path = f"{data_date_dir}/denv_2023_global_deaths_draws.parquet"
+denv_2023_global_incidence_draws_path = f"{data_date_dir}/denv_2023_global_incidence_draws.parquet"
+all_CD_results_draws_path = f"{data_date_dir}/all_CD_results_draws.parquet"
+denv_A0_DALY_draws_path = f"{data_date_dir}/denv_A0_DALY_draws.parquet"
+sequela_draws_path = f"{data_date_dir}/sequela_draws.parquet"
+```
+
+## Load Data
+
+```{python}
+# Example: Load processed data
+# import pandas as pd
+# data = pd.read_parquet(DATA_DIR / "your_data_file.parquet")
+```
+
+## Key Statistics
+
+Calculate statistics referenced in manuscript text.
+
+```{python}
+# Example:
+# global_total = data['cases'].sum()
+# percent_change = (data.loc[data['year'] == final_year, 'cases'].sum() - data.loc[data['year'] == baseline_year, 'cases'].sum()) / data.loc[data['year'] == baseline_year, 'cases'].sum() * 100
+#
+# print(f"Global total cases: {global_total:,}")
+# print(f"Percent change: {percent_change:.1f}%")
+```

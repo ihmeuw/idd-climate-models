@@ -1,0 +1,30 @@
+project:
+  type: manuscript
+
+manuscript:
+  article: manuscript.qmd
+  # Uncomment when ready to include notebooks in final manuscript
+  # notebooks:
+  #   - notebooks/01_text_statistics.qmd
+  #   - notebooks/02_figures.qmd
+  #   - notebooks/03_tables.qmd
+
+  resources:
+    - figures/
+    - tables/
+
+bibliography: references.bib
+csl: lancet.csl
+
+format:
+  docx:
+    toc: false
+    number-sections: true
+  html:
+    toc: true
+    theme: cosmo
+
+execute:
+  echo: false
+  warning: false
+  message: false

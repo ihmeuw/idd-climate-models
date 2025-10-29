@@ -1,0 +1,61 @@
+---
+title: "Global, regional, and national dengue burden in 135 countries, 1990 - 2023: a systematic analysis from the Global Burden of Disease Study 2023"
+author:
+  - name: Ewerton Cousin
+    affiliations:
+      - name: Institute for Health Metrics and Evaluation
+  - name: Jonathan Mosser
+    email: jmosser@uw.edu
+    affiliations:
+      - name: Institute for Health Metrics and Evaluation
+    corresponding: true
+  - name: Robert Reiner
+    email: bcreiner@uw.edu
+    affiliations:
+      - name: Institute for Health Metrics and Evaluation
+    corresponding: true
+keywords:
+  - dengue
+  - Global Burden of Disease
+  - DALYs
+  - vector-borne disease
+date: today
+---
+<!-- -------------------------------------------- -->
+<!--               Abstract                       -->
+<!-- -------------------------------------------- -->
+## Abstract
+### Background
+
+The Global Burden of Diseases, Injuries, and Risk Factors Study (GBD) 2021 provides an up-to-date analysis of the burden of dengue in 135 countries. This study assesses cases by severity and deaths from 1990-2021 and quantifies how the burden of dengue had changed in people of all ages.
+
+### Methods
+We estimated dengue mortality by age, sex, geography, and year using a modeling platform shared across most causes of death in the GBD 2021 study called the Cause of Death Ensemble model. We modeled dengue morbidity, including incidence and prevalence, using a meta-regression platform called DisMod-MR.
+
+### Findings
+In 2021 there were an estimated 2.08 million disability-adjusted life years (DALYs) lost due to dengue, with 29,100 dengue-attributable deaths and 59 million symptomatic dengue cases. Within the GBD 2021 study, dengue was the only notable communicable disease to show global increases in age-adjusted DALY rate since 2000, increasing from 23.9 DALYs per 100,000 to 27.8 DALYs per 100,000. Burden was found to be highest in children under 5 and burden and trends in burden were not found to be correlated with a country's Socio-demographic Index across endemic countries.
+
+### Interpretations
+Although dengue burden ranks below diseases such as malaria and tuberculosis, it is the only major infectious disease whose burden is increasing. Many of the underlying causes of this growth, such as climate change and urbanization, are expected to continue to drive further growth in dengue burden in the future. Careful yet immediate use of recently developed tools to reduce dengue burden is critical to reverse this current increasing trend.
+
+### Funding
+Bill & Melinda Gates Foundation
+
+<!-- -------------------------------------------- -->
+<!--                    RIC                       -->
+<!-- -------------------------------------------- -->
+## Research in context
+### Evidence before this study
+In the Global Burden of Diseases, Injuries, and Risk Factors Study (GBD) 2019, dengue continued to be identified as the most prevalent arbovirus, causing 56.9 million symptomatic cases and 36,000 deaths. The WHO NTD Roadmap has established a goal of reducing dengue burden by 25% from 2010-2020 levels by 2030. Recent work has shown that the range of both dengue and the common mosquito vectors of dengue have grown over the past 20 years and are forecasted to continue to grow, in part due to climate change and increased urbanization.
+
+### Added value of this study
+We present detailed, updated estimates of the burden of dengue by year, location, age, and sequelae from 1990 to 2021 based on GBD 2021, including newer evidence of the global trends of dengue in comparison to other major infectious diseases. In addition to descriptions of trends in morbidity and mortality, we compare these quantities to each country's Socio-demographic Index (SDI). Finally, we compare observed trends in burden to the rate of burden reduction required to achieve the WHO NTD Roadmap goals.
+
+### Implications of all the available evidence
+Dengue is the only notable infectious disease whose burden has increased since 2000, with total burden increasing from 1.47 million to 2.08 million Disability-Adjusted Life Years (DALYs) lost over that period. Even adjusting for population growth, per capita dengue DALYs have grown over this time. Unlike patterns seen for most other infectious diseases, there is no clear relationship between higher SDI and lower dengue burden nor faster reduction of dengue burden within endemic countries. Moreover, many of the drivers of this burden, such as global climate change and urbanization, are predicted to continue to trend in directions that will drive further burden growth. While this all bodes poorly for the WHO NTD Roadmap goals of a 25% reduction in dengue burden from 2020 to 2030, the emergence of several new dengue burden reduction tools provides some potential for relief from the growing burden of dengue. As these and other new tools become available, there is an immediate need to target these tools towards the areas in greatest need to reverse the current trends.
+
+<!-- -------------------------------------------- -->
+<!--               Introduction                   -->
+<!-- -------------------------------------------- -->
+## Introduction
+

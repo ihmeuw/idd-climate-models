@@ -1,0 +1,60 @@
+---
+title: "Table Generation"
+author: "Your Name"
+date: today
+format:
+  html:
+    code-fold: false
+    toc: true
+jupyter: python3
+---
+
+## Setup
+
+```{python setup}
+import pandas as pd
+import numpy as np
+from pathlib import Path
+
+# Define paths
+PROJECT_ROOT = Path.cwd().parent.parent  # Go up to repo root
+MANUSCRIPT_DIR = PROJECT_ROOT / "src" / "idd_manuscripts" / "GBD2023_DENV"
+TABLE_DIR = MANUSCRIPT_DIR / "tables"
+DATA_DIR = MANUSCRIPT_DIR / "data"
+
+# Create tables directory if it doesn't exist
+TABLE_DIR.mkdir(parents=True, exist_ok=True)
+
+print(f"Saving tables to: {TABLE_DIR}")
+```
+
+## Load Data
+
+```{python load-data}
+# Load processed data
+# data = pd.read_csv(DATA_DIR / "dengue_estimates.csv")
+```
+
+## Table 1: Summary Statistics
+
+```{python table1}
+# Create silly test table
+regions = ['Global', 'Southeast Asia', 'Latin America', 'Sub-Saharan Africa']
+cases = [1234567, 456789, 345678, 123456]
+deaths = [12345, 4567, 3456, 1234]
+
+table1 = pd.DataFrame({
+    'Region': regions,
+    'Cases': cases,
+    'Deaths': deaths,
+    'CFR (%)': np.round(np.array(deaths) / np.array(cases) * 100, 2)
+})
+
+# Save as CSV
+table1.to_csv(TABLE_DIR / "table1.csv", index=False)
+
+print("✅ Table 1 saved!")
+
+# Display table
+table1
+```
