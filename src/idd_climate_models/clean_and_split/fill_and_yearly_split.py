@@ -5,7 +5,7 @@ import xarray as xr
 from datetime import datetime
 import argparse
 from pathlib import Path
-from scipy.ndimage import distance_transform_edt  # <-- ADD THIS LINE
+from scipy.ndimage import distance_transform_edt
 
 # Assuming your constants file is accessible
 import idd_climate_models.constants as rfc
@@ -18,9 +18,9 @@ MIN_YEAR = 1950
 MAX_YEAR = 2100
 
 
-def define_dest_dir(model, variant, scenario, variable, grid, time_period):
+def define_dest_dir(processed_data_path, data_source, model, variant, scenario, variable, grid, time_period):
     """Define the destination directory based on model parameters."""
-    dest_dir = os.path.join(PROCESSED_DATA_PATH, model, variant, scenario, variable, grid, time_period)
+    dest_dir = os.path.join(processed_data_path, data_source, model, variant, scenario, variable, grid, time_period)
     os.makedirs(dest_dir, exist_ok=True)
     return dest_dir
 
@@ -158,6 +158,7 @@ def main():
     """Main function to process climate model data."""
     # Set up argument parser
     parser = argparse.ArgumentParser(description="Fill and yearly split climate model data")
+    parser.add_argument("--data_source", type=str, default="cmip6", help="Data source (default: cmip6)")
     parser.add_argument("--model", type=str, required=True, help="Climate model name")
     parser.add_argument("--variant", type=str, required=True, help="Model variant")
     parser.add_argument("--scenario", type=str, required=True, help="Climate scenario")
@@ -165,6 +166,7 @@ def main():
     parser.add_argument("--grid", type=str, required=True, help="Grid type")
     parser.add_argument("--time_period", type=str, required=True, help="Time period of the data")
     parser.add_argument("--file_path", type=str, required=True, help="Path to the input file")
+    
     
     # Parse arguments
     args = parser.parse_args()
@@ -176,11 +178,13 @@ def main():
     
     # Create destination directory
     dest_dir = define_dest_dir(
-        args.model, args.variant, args.scenario, 
-        args.variable, args.grid, args.time_period
+        args.data_source, args.model, args.variant, args.scenario, 
+        args.variable, args.grid, args.time_period,
+        PROCESSED_DATA_PATH
     )
     
     print(f"Processing climate model data:")
+    print(f"  Data source: {args.data_source}")
     print(f"  Model: {args.model}")
     print(f"  Variant: {args.variant}")
     print(f"  Scenario: {args.scenario}")
@@ -201,7 +205,3 @@ def main():
     else:
         print("\n✗ Processing failed!")
         return 1
-
-
-if __name__ == "__main__":
-    exit(main())

@@ -18,11 +18,6 @@ SCRIPT_ROOT = rfc.REPO_ROOT / repo_name / "src" / package_name / "clean_and_spli
 DATA_SOURCE = "cmip6"  # Data source name (used in log filename)
 RERUN = False  # Set to True to reprocess everything, False to skip already processed files
 
-# Granularity of the rerun ---
-# 'file': Rerun only the specific files that are missing (default).
-# 'model': If any file is missing for a model, rerun all files for that entire model.
-RERUN_SCOPE = 'file' 
-
 # Step 1: Find unprocessed models using the processing log
 # This only validates models/variants not already marked as complete
 print("=" * 80)
@@ -30,7 +25,7 @@ print("STEP 1: Finding unprocessed models")
 print("=" * 80)
 results = find_unprocessed_models(
     DATA_DIR, 
-    PROCESSED_DATA_PATH, 
+    PROCESSED_DATA_PATH,
     data_source=DATA_SOURCE, 
     verbose=True
 )
@@ -46,10 +41,9 @@ print("STEP 2: Checking for already processed files")
 print("=" * 80)
 results = filter_already_processed(
     results, 
-    PROCESSED_DATA_PATH, 
+    PROCESSED_DATA_PATH,
     data_source=DATA_SOURCE,
     rerun=RERUN,
-    rerun_scope=RERUN_SCOPE,
     verbose=True
 )
 
@@ -114,6 +108,7 @@ task_template = tool.get_task_template(
     },
     command_template=(
         "python {script_root}/fill_and_yearly_split.py "
+        "--data_source {{data_source}} "
         "--model {{model}} "
         "--variant {{variant}} "
         "--scenario {{scenario}} "
@@ -122,7 +117,7 @@ task_template = tool.get_task_template(
         "--time_period {{time_period}} "
         "--file_path {{file_path}} "
     ).format(script_root=SCRIPT_ROOT),
-    node_args=["model", "variant", "scenario", "variable", "grid", "time_period", "file_path"],
+    node_args=["data_source", "model", "variant", "scenario", "variable", "grid", "time_period", "file_path"],
     task_args=[],
     op_args=[],
 )
@@ -132,29 +127,21 @@ print("\n" + "=" * 80)
 print("STEP 3: Creating Jobmon tasks")
 print("=" * 80)
 tasks = []
-for model in complete_models:
-    variants = results[model]['variants']
-    for variant in variants:
-        scenarios = variants[variant]['scenarios']
-        for scenario in scenarios:
-            variables = scenarios[scenario]['variables']
-            for variable in variables:
-                grids = variables[variable]['grids']
-                for grid in grids:
-                    time_periods = grids[grid]['time_periods']
-                    for time_period in time_periods:
-                        files = time_periods[time_period]['files']
-                        for file_path in files:
-                            task = task_template.create_task(
-                                model=model,
-                                variant=variant,
-                                scenario=scenario,
-                                variable=variable,
-                                grid=grid,
-                                time_period=time_period,
-                                file_path=file_path,
-                            )
-                            tasks.append(task)
+for model_name in complete_models:
+    model_data = results[model_name]
+    # Use the iterator to simplify looping
+    for variant, scenario, variable, grid, time_period, file_path, _ in iterate_model_files(model_data):
+        task = task_template.create_task(
+            data_source=DATA_SOURCE,
+            model=model_name,
+            variant=variant,
+            scenario=scenario,
+            variable=variable,
+            grid=grid,
+            time_period=time_period,
+            file_path=file_path,
+        )
+        tasks.append(task)
 
 print(f"Number of tasks to run: {len(tasks)}")
 
