@@ -133,11 +133,24 @@ def check_date_coverage(date_ranges, scenario, monthly, time_rules):
     expected_start, expected_end = time_rules['date_ranges'][scenario][range_type]
     actual_start, actual_end = date_ranges[0][0], date_ranges[-1][1]
     
+    expected_start_year = int(str(expected_start)[:4])
+    actual_start_year = int(str(actual_start)[:4])
+    expected_end_year = int(str(expected_end)[:4])
+    actual_end_year = int(str(actual_end)[:4])
+
     if actual_start > expected_start:
-        issues.append(f"Coverage starts too late: {actual_start}, expected by: {expected_start}")
+        if expected_start_year == 2015 and actual_start_year <= 2020:
+            issues.append(f"Coverage starts a little late: {actual_start}, expected by: {expected_start}")
+            return True, issues
+        else:
+            issues.append(f"Coverage starts too late: {actual_start}, expected by: {expected_start}")
         return False, issues
     if actual_end < expected_end:
-        issues.append(f"Coverage ends too early: {actual_end}, expected until: {expected_end}")
+        if expected_end_year == 2100 and actual_end_year >= 2095:
+            issues.append(f"Coverage ends a little early: {actual_end}, expected until: {expected_end}")
+            return True, issues
+        else:
+            issues.append(f"Coverage ends too early: {actual_end}, expected until: {expected_end}")
         return False, issues
     
     # Check for gaps
@@ -173,9 +186,33 @@ def validate_time_level(path, context, time_folder):
         date_ranges, context['scenario'], monthly, VALIDATION_RULES['time']
     )
     
+    files_with_metadata = []
+    fill_start_flagged = False
+    fill_end_flagged = False
+    # Sort files by date to easily find the first and last
+    sorted_files = sorted(nc_files, key=lambda f: re.search(r'(\d{6,8})-(\d{6,8})\.nc', f).group(1))
+
+    for issue in coverage_issues:
+        if "starts a little late" in issue and not fill_start_flagged:
+            # Flag the first file in the sequence
+            if sorted_files:
+                files_with_metadata.append({'path': os.path.join(path, sorted_files[0]), 'fill_required': True})
+                fill_start_flagged = True
+        elif "ends a little early" in issue and not fill_end_flagged:
+            # Flag the last file in the sequence
+            if sorted_files:
+                files_with_metadata.append({'path': os.path.join(path, sorted_files[-1]), 'fill_required': True})
+                fill_end_flagged = True
+
+    # Add remaining files without the flag
+    for f in sorted_files:
+        full_path = os.path.join(path, f)
+        if not any(d['path'] == full_path for d in files_with_metadata):
+            files_with_metadata.append({'path': full_path, 'fill_required': False})
+    
     return {
         'complete': complete and len(naming_issues) == 0,
-        'files': [os.path.join(path, f) for f in nc_files],
+        'files': files_with_metadata, # Use the new list of dicts
         'issues': issues + naming_issues + coverage_issues
     }
 
@@ -451,65 +488,48 @@ def filter_already_processed(validation_results, processed_data_path, data_sourc
         if not model_data.get('complete'):
             continue
         
-        filtered_model = {'complete': model_data['complete'], 'issues': model_data.get('issues', []), 'variants': {}}
+        # Use the iterator to simplify checking
+        files_to_process = []
+        variant_stats = {'total': 0, 'scenarios': set(), 'variables': set()}
         
-        for variant, vdata in model_data.get('variants', {}).items():
-            filtered_variant = {'complete': vdata['complete'], 'issues': vdata.get('issues', []), 'scenarios': {}}
-            variant_stats = {'total': 0, 'remaining': 0, 'scenarios': set(), 'variables': set()}
+        for variant, scenario, variable, grid, time_period, file_path, fill_required in iterate_model_files(model_data):
+            stats['total'] += 1
+            variant_stats['total'] += 1
+            variant_stats['scenarios'].add(scenario)
+            variant_stats['variables'].add(variable)
             
-            for scenario, sdata in vdata.get('scenarios', {}).items():
-                variant_stats['scenarios'].add(scenario)
-                filtered_scenario = {'complete': sdata['complete'], 'issues': sdata.get('issues', []), 'variables': {}}
-                scenario_has_tasks = False
-                
-                for variable, vardata in sdata.get('variables', {}).items():
-                    variant_stats['variables'].add(variable)
-                    filtered_var = {'complete': vardata['complete'], 'issues': vardata.get('issues', []), 'grids': {}}
-                    var_has_tasks = False
-                    
-                    for grid, gdata in vardata.get('grids', {}).items():
-                        filtered_grid = {'complete': gdata['complete'], 'issues': gdata.get('issues', []), 'time_periods': {}}
-                        grid_has_tasks = False
-                        
-                        for time_period, tdata in gdata.get('time_periods', {}).items():
-                            filtered_time = {'complete': tdata['complete'], 'issues': tdata.get('issues', []), 'files': []}
-                            
-                            for file_path in tdata.get('files', []):
-                                stats['total'] += 1
-                                variant_stats['total'] += 1
-                                if not check_processed_files_exist(model, variant, scenario, variable, grid, 
-                                                                  time_period, file_path, processed_data_path, data_source):
-                                    filtered_time['files'].append(file_path)
-                                    stats['remaining'] += 1
-                                    variant_stats['remaining'] += 1
-                            
-                            if filtered_time['files']:
-                                filtered_grid['time_periods'][time_period] = filtered_time
-                                grid_has_tasks = True
-                        
-                        if grid_has_tasks:
-                            filtered_var['grids'][grid] = filtered_grid
-                            var_has_tasks = True
-                    
-                    if var_has_tasks:
-                        filtered_scenario['variables'][variable] = filtered_var
-                        scenario_has_tasks = True
-                
-                if scenario_has_tasks:
-                    filtered_variant['scenarios'][scenario] = filtered_scenario
-            
-            if filtered_variant['scenarios']:
-                filtered_model['variants'][variant] = filtered_variant
-            elif variant_stats['total'] > 0 and variant_stats['remaining'] == 0:
-                stats['variants_done'].append({
-                    'model': model, 'variant': variant,
-                    'scenarios': list(variant_stats['scenarios']),
-                    'variables': list(variant_stats['variables'])
+            if not check_processed_files_exist(model, variant, scenario, variable, grid, 
+                                              time_period, file_path, processed_data_path, data_source):
+                stats['remaining'] += 1
+                files_to_process.append({
+                    'variant': variant, 'scenario': scenario, 'variable': variable, 'grid': grid,
+                    'time_period': time_period, 'path': file_path, 'fill_required': fill_required
                 })
-        
-        if filtered_model['variants']:
+
+        # If no files are left to process for this variant, log it as complete
+        if variant_stats['total'] > 0 and not files_to_process and model_data.get('variants'):
+            # This assumes one variant per model_data structure in this loop context
+            variant_name = list(model_data['variants'].keys())[0]
+            stats['variants_done'].append({
+                'model': model, 'variant': variant_name,
+                'scenarios': list(variant_stats['scenarios']),
+                'variables': list(variant_stats['variables'])
+            })
+            continue
+
+        # Rebuild the nested dictionary from the list of files to process
+        if files_to_process:
+            filtered_model = {'complete': True, 'issues': [], 'variants': {}}
+            for f in files_to_process:
+                v_level = filtered_model['variants'].setdefault(f['variant'], {'complete': True, 'issues': [], 'scenarios': {}})
+                s_level = v_level['scenarios'].setdefault(f['scenario'], {'complete': True, 'issues': [], 'variables': {}})
+                var_level = s_level['variables'].setdefault(f['variable'], {'complete': True, 'issues': [], 'grids': {}})
+                g_level = var_level['grids'].setdefault(f['grid'], {'complete': True, 'issues': [], 'time_periods': {}})
+                t_level = g_level['time_periods'].setdefault(f['time_period'], {'complete': True, 'issues': [], 'files': []})
+                t_level['files'].append({'path': f['path'], 'fill_required': f['fill_required']})
+            
             filtered_results[model] = filtered_model
-    
+
     # Update log for completed variants
     for entry in stats['variants_done']:
         update_processing_log(entry['model'], entry['variant'], entry['scenarios'], 
@@ -549,31 +569,38 @@ def iterate_model_files(model_structure, filter_complete=True):
     
     Yields:
     -------
-    tuple : (variant, scenario, variable, grid, time_period, filepath, is_complete)
+    tuple : (variant, scenario, variable, grid, time_period, filepath, fill_required)
     """
     for variant_name, variant_data in sorted(model_structure.get('variants', {}).items()):
-        if filter_complete and not variant_data['complete']:
+        if filter_complete and not variant_data.get('complete', True):
             continue
             
         for scenario_name, scenario_data in sorted(variant_data.get('scenarios', {}).items()):
-            if filter_complete and not scenario_data['complete']:
+            if filter_complete and not scenario_data.get('complete', True):
                 continue
                 
             for var_name, var_data in sorted(scenario_data.get('variables', {}).items()):
-                if filter_complete and not var_data['complete']:
+                if filter_complete and not var_data.get('complete', True):
                     continue
                     
                 for grid_name, grid_data in sorted(var_data.get('grids', {}).items()):
-                    if filter_complete and not grid_data['complete']:
+                    if filter_complete and not grid_data.get('complete', True):
                         continue
                         
                     for time_name, time_data in sorted(grid_data.get('time_periods', {}).items()):
-                        if filter_complete and not time_data['complete']:
+                        if filter_complete and not time_data.get('complete', True):
                             continue
                             
-                        for filepath in sorted(time_data.get('files', [])):
-                            yield (variant_name, scenario_name, var_name, grid_name, 
-                                   time_name, filepath, time_data['complete'])
+                        for file_info in time_data.get('files', []):
+                            # Handle both new dict format and old string format
+                            if isinstance(file_info, dict):
+                                file_path = file_info.get('path')
+                                fill_required = file_info.get('fill_required', False)
+                                yield (variant_name, scenario_name, var_name, grid_name, 
+                                       time_name, file_path, fill_required)
+                            else: # Legacy support for string paths
+                                yield (variant_name, scenario_name, var_name, grid_name, 
+                                       time_name, file_info, False)
 
 def print_model_tree(model_structure, model_name, max_depth=None, show_complete=False):
     """Print a tree view of the model structure."""

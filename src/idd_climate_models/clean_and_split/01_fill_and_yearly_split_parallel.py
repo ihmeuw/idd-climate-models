@@ -88,14 +88,14 @@ workflow.set_default_compute_resources_from_dict(
         "runtime": "5m",
         "queue": queue,
         "project": project,
-        "stdout": str(stdout_dir),
-        "stderr": str(stderr_dir),
+        # "stdout": str(stdout_dir),
+        # "stderr": str(stderr_dir),
     }
 )
 
 # Define the task template
 task_template = tool.get_task_template(
-    template_name="malaria_as_calculation",
+    template_name="fill_and_yearly_split",
     default_cluster_name="slurm",
     default_compute_resources={
         "memory": "30G",
@@ -103,12 +103,11 @@ task_template = tool.get_task_template(
         "runtime": "5m",
         "queue": queue,
         "project": project,
-        "stdout": str(stdout_dir),
-        "stderr": str(stderr_dir),
+        # "stdout": str(stdout_dir),
+        # "stderr": str(stderr_dir),
     },
     command_template=(
         "python {script_root}/fill_and_yearly_split.py "
-        "--data_source {{data_source}} "
         "--model {{model}} "
         "--variant {{variant}} "
         "--scenario {{scenario}} "
@@ -116,8 +115,9 @@ task_template = tool.get_task_template(
         "--grid {{grid}} "
         "--time_period {{time_period}} "
         "--file_path {{file_path}} "
+        "--fill_missing_years {{fill_missing_years}}"
     ).format(script_root=SCRIPT_ROOT),
-    node_args=["data_source", "model", "variant", "scenario", "variable", "grid", "time_period", "file_path"],
+    node_args=["model", "variant", "scenario", "variable", "grid", "time_period", "file_path", "fill_missing_years"],
     task_args=[],
     op_args=[],
 )
@@ -127,21 +127,30 @@ print("\n" + "=" * 80)
 print("STEP 3: Creating Jobmon tasks")
 print("=" * 80)
 tasks = []
-for model_name in complete_models:
-    model_data = results[model_name]
-    # Use the iterator to simplify looping
-    for variant, scenario, variable, grid, time_period, file_path, _ in iterate_model_files(model_data):
-        task = task_template.create_task(
-            data_source=DATA_SOURCE,
-            model=model_name,
-            variant=variant,
-            scenario=scenario,
-            variable=variable,
-            grid=grid,
-            time_period=time_period,
-            file_path=file_path,
-        )
-        tasks.append(task)
+for model in complete_models:
+    variants = results[model]['variants']
+    for variant in variants:
+        scenarios = variants[variant]['scenarios']
+        for scenario in scenarios:
+            variables = scenarios[scenario]['variables']
+            for variable in variables:
+                grids = variables[variable]['grids']
+                for grid in grids:
+                    time_periods = grids[grid]['time_periods']
+                    for time_period in time_periods:
+                        files_metadata = time_periods[time_period]['files']
+                        for file_meta in files_metadata:
+                            task = task_template.create_task(
+                                model=model,
+                                variant=variant,
+                                scenario=scenario,
+                                variable=variable,
+                                grid=grid,
+                                time_period=time_period,
+                                file_path=file_meta['path'],
+                                fill_missing_years=file_meta['fill_required']
+                            )
+                            tasks.append(task)
 
 print(f"Number of tasks to run: {len(tasks)}")
 

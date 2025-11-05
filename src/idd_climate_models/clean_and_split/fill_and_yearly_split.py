@@ -74,7 +74,7 @@ def fill_nans_xarray(ds):
     return ds_filled
 
 
-def write_yearly_files(ds, src_file, dest_dir):
+def write_yearly_files(ds, src_file, dest_dir, fill_missing_years=False):
     """Write dataset split into yearly files."""
     time_folder = os.path.basename(os.path.dirname(src_file))
     is_monthly = 'mon' in time_folder.lower()
@@ -107,9 +107,45 @@ def write_yearly_files(ds, src_file, dest_dir):
         except Exception as e:
             print(f"    ✗ Failed to write year {year}: {str(e)}")
             raise
+    if fill_missing_years:
+        first_data_year = years.min()
+        last_data_year = years.max()
+        if first_data_year <= 2020:
+            ds_year = ds.sel(time=ds.time.dt.year == first_data_year)
 
+            for year_to_fill in range(2015, first_data_year):
+                print(f"    Filling missing year: {year_to_fill}")
+                base_name = os.path.basename(src_file)
+                if is_monthly:
+                    out_fname = re.sub(r'_(\d{6})-(\d{6})\.nc$', f'_{year_to_fill}01-{year_to_fill}12.nc', base_name)
+                elif is_daily:
+                    out_fname = re.sub(r'_(\d{8})-(\d{8})\.nc$', f'_{year_to_fill}0101-{year_to_fill}1231.nc', base_name)
+                else:
+                    out_fname = re.sub(r'_(\d{6,8})-(\d{6,8})\.nc$', f'_{year_to_fill}.nc', base_name)
 
-def process_file(file_path, dest_dir):
+                out_path = os.path.join(dest_dir, out_fname)
+                encoding = {var: {'zlib': True, 'complevel': 4, 'shuffle': True} for var in ds_year.data_vars}
+                ds_year.to_netcdf(out_path, encoding=encoding, engine='netcdf4')
+                print(f"    Wrote: {out_fname}")
+        if last_data_year >= 2095:
+            ds_year = ds.sel(time=ds.time.dt.year == last_data_year)
+
+            for year_to_fill in range(last_data_year + 1, MAX_YEAR + 1):
+                print(f"    Filling missing year: {year_to_fill}")
+                base_name = os.path.basename(src_file)
+                if is_monthly:
+                    out_fname = re.sub(r'_(\d{6})-(\d{6})\.nc$', f'_{year_to_fill}01-{year_to_fill}12.nc', base_name)
+                elif is_daily:
+                    out_fname = re.sub(r'_(\d{8})-(\d{8})\.nc$', f'_{year_to_fill}0101-{year_to_fill}1231.nc', base_name)
+                else:
+                    out_fname = re.sub(r'_(\d{6,8})-(\d{6,8})\.nc$', f'_{year_to_fill}.nc', base_name)
+
+                out_path = os.path.join(dest_dir, out_fname)
+                encoding = {var: {'zlib': True, 'complevel': 4, 'shuffle': True} for var in ds_year.data_vars}
+                ds_year.to_netcdf(out_path, encoding=encoding, engine='netcdf4')
+                print(f"    Wrote: {out_fname}")
+
+def process_file(file_path, dest_dir, fill_missing_years):
     """Process a single NetCDF file: trim, fill NaNs, and split into yearly files."""
     try:
         start_time = datetime.now()
@@ -140,7 +176,7 @@ def process_file(file_path, dest_dir):
             ds_filled = ds
         
         print("  Writing yearly files...")
-        write_yearly_files(ds_filled, file_path, dest_dir)
+        write_yearly_files(ds_filled, file_path, dest_dir, fill_missing_years=fill_missing_years)
         
         ds.close()
         ds_filled.close()
@@ -166,6 +202,7 @@ def main():
     parser.add_argument("--grid", type=str, required=True, help="Grid type")
     parser.add_argument("--time_period", type=str, required=True, help="Time period of the data")
     parser.add_argument("--file_path", type=str, required=True, help="Path to the input file")
+    parser.add_argument("--fill_missing_years", type=lambda x: (str(x).lower() == 'true'), default=False, help="Flag to fill missing years at the edges")
     
     
     # Parse arguments
@@ -194,11 +231,12 @@ def main():
     print(f"  Input file: {args.file_path}")
     print(f"  Output directory: {dest_dir}")
     print(f"  Year range: {MIN_YEAR}-{MAX_YEAR}")
+    print(f"  Fill missing years: {args.fill_missing_years}")
     print()
     
     # Process the file
-    success = process_file(args.file_path, dest_dir)
-    
+    success = process_file(args.file_path, dest_dir, fill_missing_years=args.fill_missing_years)
+
     if success:
         print("\n✓ Processing completed successfully!")
         return 0
