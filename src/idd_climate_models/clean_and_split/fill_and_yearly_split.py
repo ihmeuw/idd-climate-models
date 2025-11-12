@@ -7,9 +7,9 @@ import argparse
 from pathlib import Path
 from scipy.ndimage import distance_transform_edt
 
-# Assuming your constants file is accessible
+# Updated imports
 import idd_climate_models.constants as rfc
-from idd_climate_models.validate_model_functions import int_to_date, is_monthly
+from idd_climate_models.validation_functions import int_to_date, is_monthly
 
 PROCESSED_DATA_PATH = rfc.PROCESSED_DATA_PATH
 
@@ -18,9 +18,9 @@ MIN_YEAR = 1950
 MAX_YEAR = 2100
 
 
-def define_dest_dir(processed_data_path, data_source, model, variant, scenario, variable, grid, time_period):
+def define_dest_dir(processed_data_path, data_source, model, variant, scenario, variable, grid, frequency):
     """Define the destination directory based on model parameters."""
-    dest_dir = os.path.join(processed_data_path, data_source, model, variant, scenario, variable, grid, time_period)
+    dest_dir = os.path.join(processed_data_path, data_source, model, variant, scenario, variable, grid, frequency)
     os.makedirs(dest_dir, exist_ok=True)
     return dest_dir
 
@@ -56,7 +56,7 @@ def fill_nans_xarray(ds):
     for var_name in ds.data_vars:
         variable = ds[var_name]
         if variable.isnull().any():
-            print(f"    Filling NaNs in variable '{var_name}' using nearest neighbor...")
+            print(f"        Filling NaNs in variable '{var_name}' using nearest neighbor...")
             
             # Get numpy data, fill it, and create a new DataArray
             filled_np_data = fill_nans_nearest(variable.values)
@@ -74,16 +74,16 @@ def fill_nans_xarray(ds):
     return ds_filled
 
 
-def write_yearly_files(ds, src_file, dest_dir, fill_missing_years=False):
+def write_yearly_files(ds, src_file, dest_dir, fill_required=False, compression_level=7):
     """Write dataset split into yearly files."""
     time_folder = os.path.basename(os.path.dirname(src_file))
-    is_monthly = 'mon' in time_folder.lower()
+    is_monthly_data = is_monthly(time_folder)  # Renamed to avoid conflict
     is_daily = time_folder.lower() == 'day'
     
     # The dataset is already trimmed, so we just get the years present
     years = np.unique(ds["time.year"].values)
     
-    print(f"  Years to process: {len(years)} ({years[0]}-{years[-1]})")
+    print(f"    Years to process: {len(years)} ({years[0]}-{years[-1]})")
     
     for year in years:
         try:
@@ -92,7 +92,7 @@ def write_yearly_files(ds, src_file, dest_dir, fill_missing_years=False):
                 continue
             
             base_name = os.path.basename(src_file)
-            if is_monthly:
+            if is_monthly_data:  # Updated variable name
                 out_fname = re.sub(r'_(\d{6})-(\d{6})\.nc$', f'_{year}01-{year}12.nc', base_name)
             elif is_daily:
                 out_fname = re.sub(r'_(\d{8})-(\d{8})\.nc$', f'_{year}0101-{year}1231.nc', base_name)
@@ -100,23 +100,32 @@ def write_yearly_files(ds, src_file, dest_dir, fill_missing_years=False):
                 out_fname = re.sub(r'_(\d{6,8})-(\d{6,8})\.nc$', f'_{year}.nc', base_name)
             
             out_path = os.path.join(dest_dir, out_fname)
-            encoding = {var: {'zlib': True, 'complevel': 4, 'shuffle': True} for var in ds_year.data_vars}
+            encoding = {
+                var: {
+                    'zlib': True, 
+                    'complevel': compression_level,
+                    'shuffle': True,
+                    'chunksizes': ds_year[var].shape 
+                } 
+                for var in ds_year.data_vars
+            }
             ds_year.to_netcdf(out_path, encoding=encoding, engine='netcdf4')
-            print(f"    Wrote: {out_fname}")
+            print(f"        Wrote: {out_fname}")
             
         except Exception as e:
-            print(f"    ✗ Failed to write year {year}: {str(e)}")
+            print(f"        ✗ Failed to write year {year}: {str(e)}")
             raise
-    if fill_missing_years:
+            
+    if fill_required:
         first_data_year = years.min()
         last_data_year = years.max()
         if first_data_year <= 2020:
             ds_year = ds.sel(time=ds.time.dt.year == first_data_year)
 
             for year_to_fill in range(2015, first_data_year):
-                print(f"    Filling missing year: {year_to_fill}")
+                print(f"        Filling missing year: {year_to_fill}")
                 base_name = os.path.basename(src_file)
-                if is_monthly:
+                if is_monthly_data:  # Updated variable name
                     out_fname = re.sub(r'_(\d{6})-(\d{6})\.nc$', f'_{year_to_fill}01-{year_to_fill}12.nc', base_name)
                 elif is_daily:
                     out_fname = re.sub(r'_(\d{8})-(\d{8})\.nc$', f'_{year_to_fill}0101-{year_to_fill}1231.nc', base_name)
@@ -126,14 +135,15 @@ def write_yearly_files(ds, src_file, dest_dir, fill_missing_years=False):
                 out_path = os.path.join(dest_dir, out_fname)
                 encoding = {var: {'zlib': True, 'complevel': 4, 'shuffle': True} for var in ds_year.data_vars}
                 ds_year.to_netcdf(out_path, encoding=encoding, engine='netcdf4')
-                print(f"    Wrote: {out_fname}")
+                print(f"        Wrote: {out_fname}")
+                
         if last_data_year >= 2095:
             ds_year = ds.sel(time=ds.time.dt.year == last_data_year)
 
             for year_to_fill in range(last_data_year + 1, MAX_YEAR + 1):
-                print(f"    Filling missing year: {year_to_fill}")
+                print(f"        Filling missing year: {year_to_fill}")
                 base_name = os.path.basename(src_file)
-                if is_monthly:
+                if is_monthly_data:  # Updated variable name
                     out_fname = re.sub(r'_(\d{6})-(\d{6})\.nc$', f'_{year_to_fill}01-{year_to_fill}12.nc', base_name)
                 elif is_daily:
                     out_fname = re.sub(r'_(\d{8})-(\d{8})\.nc$', f'_{year_to_fill}0101-{year_to_fill}1231.nc', base_name)
@@ -143,9 +153,9 @@ def write_yearly_files(ds, src_file, dest_dir, fill_missing_years=False):
                 out_path = os.path.join(dest_dir, out_fname)
                 encoding = {var: {'zlib': True, 'complevel': 4, 'shuffle': True} for var in ds_year.data_vars}
                 ds_year.to_netcdf(out_path, encoding=encoding, engine='netcdf4')
-                print(f"    Wrote: {out_fname}")
+                print(f"        Wrote: {out_fname}")
 
-def process_file(file_path, dest_dir, fill_missing_years):
+def process_file(file_path, dest_dir, fill_required):
     """Process a single NetCDF file: trim, fill NaNs, and split into yearly files."""
     try:
         start_time = datetime.now()
@@ -158,13 +168,13 @@ def process_file(file_path, dest_dir, fill_missing_years):
         original_years = np.unique(ds.time.dt.year.values)
         ds = ds.sel(time=ds.time.dt.year.isin(range(MIN_YEAR, MAX_YEAR + 1)))
         trimmed_years = np.unique(ds.time.dt.year.values)
-        print(f"  Trimmed years to {MIN_YEAR}-{MAX_YEAR}. Kept {len(trimmed_years)}/{len(original_years)} years.")
+        print(f"    Trimmed years to {MIN_YEAR}-{MAX_YEAR}. Kept {len(trimmed_years)}/{len(original_years)} years.")
 
         if len(trimmed_years) == 0:
-            print("  No data left after trimming to year range. Stopping.")
+            print("    No data left after trimming to year range. Stopping.")
             return True
 
-        print(f"  Dataset info: {len(ds.time)} time steps, {list(ds.data_vars.keys())} variables")
+        print(f"    Dataset info: {len(ds.time)} time steps, {list(ds.data_vars.keys())} variables")
         
         # Check for NaNs
         has_nans = any(ds[var].isnull().any() for var in ds.data_vars)
@@ -172,21 +182,21 @@ def process_file(file_path, dest_dir, fill_missing_years):
         if has_nans:
             ds_filled = fill_nans_xarray(ds)
         else:
-            print("  No NaNs found.")
+            print("    No NaNs found.")
             ds_filled = ds
         
-        print("  Writing yearly files...")
-        write_yearly_files(ds_filled, file_path, dest_dir, fill_missing_years=fill_missing_years)
+        print("    Writing yearly files...")
+        write_yearly_files(ds_filled, file_path, dest_dir, fill_required=fill_required)
         
         ds.close()
         ds_filled.close()
         
         elapsed = (datetime.now() - start_time).total_seconds()
-        print(f"  ✓ Completed in {elapsed:.1f}s")
+        print(f"    ✓ Completed in {elapsed:.1f}s")
         return True
         
     except Exception as e:
-        print(f"  ✗ Error processing {os.path.basename(file_path)}: {str(e)}")
+        print(f"    ✗ Error processing {os.path.basename(file_path)}: {str(e)}")
         return False
 
 
@@ -199,11 +209,10 @@ def main():
     parser.add_argument("--variant", type=str, required=True, help="Model variant")
     parser.add_argument("--scenario", type=str, required=True, help="Climate scenario")
     parser.add_argument("--variable", type=str, required=True, help="Climate variable")
-    parser.add_argument("--grid", type=str, required=True, help="Grid type")
-    parser.add_argument("--time_period", type=str, required=True, help="Time period of the data")
+    parser.add_argument("--grid", type=str, required=True, help="Grid data_type")
+    parser.add_argument("--frequency", type=str, required=True, help="Time period of the data")
     parser.add_argument("--file_path", type=str, required=True, help="Path to the input file")
-    parser.add_argument("--fill_missing_years", type=lambda x: (str(x).lower() == 'true'), default=False, help="Flag to fill missing years at the edges")
-    
+    parser.add_argument("--fill_required", type=lambda x: (str(x).lower() == 'true'), default=False, help="Flag to fill missing years at the edges")
     
     # Parse arguments
     args = parser.parse_args()
@@ -213,29 +222,28 @@ def main():
         print(f"Error: Input file does not exist: {args.file_path}")
         return 1
     
-    # Create destination directory
+    # Create destination directory - Fixed parameter order
     dest_dir = define_dest_dir(
-        args.data_source, args.model, args.variant, args.scenario, 
-        args.variable, args.grid, args.time_period,
-        PROCESSED_DATA_PATH
+        PROCESSED_DATA_PATH, args.data_source, args.model, args.variant, args.scenario, 
+        args.variable, args.grid, args.frequency
     )
     
     print(f"Processing climate model data:")
-    print(f"  Data source: {args.data_source}")
-    print(f"  Model: {args.model}")
-    print(f"  Variant: {args.variant}")
-    print(f"  Scenario: {args.scenario}")
-    print(f"  Variable: {args.variable}")
-    print(f"  Grid: {args.grid}")
-    print(f"  Time period: {args.time_period}")
-    print(f"  Input file: {args.file_path}")
-    print(f"  Output directory: {dest_dir}")
-    print(f"  Year range: {MIN_YEAR}-{MAX_YEAR}")
-    print(f"  Fill missing years: {args.fill_missing_years}")
+    print(f"    Data source: {args.data_source}")
+    print(f"    Model: {args.model}")
+    print(f"    Variant: {args.variant}")
+    print(f"    Scenario: {args.scenario}")
+    print(f"    Variable: {args.variable}")
+    print(f"    Grid: {args.grid}")
+    print(f"    Time period: {args.frequency}")
+    print(f"    Input file: {args.file_path}")
+    print(f"    Output directory: {dest_dir}")
+    print(f"    Year range: {MIN_YEAR}-{MAX_YEAR}")
+    print(f"    Fill missing years: {args.fill_required}")
     print()
     
     # Process the file
-    success = process_file(args.file_path, dest_dir, fill_missing_years=args.fill_missing_years)
+    success = process_file(args.file_path, dest_dir, fill_required=args.fill_required)
 
     if success:
         print("\n✓ Processing completed successfully!")
@@ -243,3 +251,7 @@ def main():
     else:
         print("\n✗ Processing failed!")
         return 1
+
+
+if __name__ == "__main__":
+    exit(main())

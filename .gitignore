@@ -85,11 +85,11 @@ venv.bak/
 .dmypy.json
 dmypy.json
 
-# Pyre type checker
+# Pyre data_type checker
 .pyre/
 
-# pytype static type analyzer
-.pytype/
+# pydata_type static data_type analyzer
+.pydata_type/
 
 # Cython debug symbols
 cython_debug/
@@ -121,15 +121,6 @@ results/tables/*
 !results/tables/.gitkeep
 results/documents/*
 !results/documents/.gitkeep
-
-# Quarto
-/.quarto/
-docs/quarto/_site/
-docs/quarto/.quarto/
-*.html
-*_files/
-*.docx
-manuscript-meca.zip
 
 # Sphinx
 docs/sphinx/_build/

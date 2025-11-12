@@ -1,63 +1,94 @@
-import importlib
 import sys
 import getpass
 import uuid
-from jobmon.client.tool import Tool  # type: ignore
+import os
+from jobmon.client.tool import Tool # type: ignore
 from pathlib import Path
+from typing import Dict, Any
 
 import idd_climate_models.constants as rfc
-from idd_climate_models.validate_model_functions import *
+from idd_climate_models.dictionary_utils import parse_results
+from idd_climate_models.io_compare_utils import compare_model_validation
 
 repo_name = rfc.repo_name
 package_name = rfc.package_name
-DATA_DIR = rfc.DATA_PATH
-PROCESSED_DATA_PATH = rfc.PROCESSED_DATA_PATH
+DATA_DIR = rfc.RAW_DATA_PATH 
+PROCESSED_DATA_PATH = rfc.PROCESSED_DATA_PATH 
 SCRIPT_ROOT = rfc.REPO_ROOT / repo_name / "src" / package_name / "clean_and_split"
 
-# Configuration
-DATA_SOURCE = "cmip6"  # Data source name (used in log filename)
-RERUN = False  # Set to True to reprocess everything, False to skip already processed files
+INPUT_DATA_TYPE = "data"
+INPUT_IO_TYPE = "raw"
+OUTPUT_DATA_TYPE = "data"
+OUTPUT_IO_TYPE = "processed" 
+DATA_SOURCE = "cmip6" 
 
-# Step 1: Find unprocessed models using the processing log
-# This only validates models/variants not already marked as complete
-print("=" * 80)
-print("STEP 1: Finding unprocessed models")
-print("=" * 80)
-results = find_unprocessed_models(
-    DATA_DIR, 
-    PROCESSED_DATA_PATH,
-    data_source=DATA_SOURCE, 
-    verbose=True
-)
+TEST_MODE = False
 
-if not results:
-    print("\n✅ All models have been processed! Nothing to do.")
-    exit(0)
+def get_file_size_gb(file_path: Path) -> float:
+    return os.path.getsize(file_path) / (1024**3)
 
-# Step 2: Filter out files that are already processed
-# This does detailed file-level checking only for unprocessed variants
-print("\n" + "=" * 80)
-print("STEP 2: Checking for already processed files")
-print("=" * 80)
-results = filter_already_processed(
-    results, 
-    PROCESSED_DATA_PATH,
+def get_resource_tier(file_size_gb: float, REQUIRED_MEM_FACTOR: float = 4.0,
+                      MIN_MEM_GB: float = 8.0, MAX_MEM_GB: float = 64.0) -> Dict[str, Any]:
+    required_mem_gb = int(file_size_gb * REQUIRED_MEM_FACTOR) + 2 
+    memory = f"{min(MAX_MEM_GB, max(MIN_MEM_GB, required_mem_gb))}G"
+    if file_size_gb < 1.0:
+        runtime = "10m"
+        cores = 4
+    elif file_size_gb < 5.0: 
+        runtime = "20m" 
+        cores = 4
+    else: 
+        runtime = "30m"
+        cores = 8 
+    return {
+        "memory": memory,
+        "cores": cores,
+        "runtime": runtime
+    }
+
+# ================================================================================
+
+# Use the unified function for validation and comparison
+validation_info = compare_model_validation(
+    input_data_type=INPUT_DATA_TYPE,
+    input_io_type=INPUT_IO_TYPE,
+    output_data_type=OUTPUT_DATA_TYPE,
+    output_io_type=OUTPUT_IO_TYPE,
     data_source=DATA_SOURCE,
-    rerun=RERUN,
     verbose=True
 )
 
-if not results:
-    print("\n✅ All remaining files have been processed! Nothing to do.")
+models_to_process = validation_info["models_to_process"]
+input_results_for_tasks = validation_info["models_to_process_dict"]["validation_results"]
+input_complete_models = validation_info["input_complete_models"]
+output_complete_models = validation_info["output_complete_models"]
+
+
+tasks_to_run = parse_results(
+    validation_dict = validation_info["models_to_process_dict"],
+    detail='all',
+)
+
+
+processed_only_models = output_complete_models - input_complete_models
+
+if processed_only_models:
+    print("\n⚠️ WARNING: Found PROCESSED models that are NOT complete in RAW data:")
+    print(f"   {processed_only_models}")
+    print("   These models may have been processed from incomplete source data.")
+
+print("\n" + "=" * 80)
+print(f"SUMMARY: {len(input_complete_models)} complete RAW models found.")
+print(f"         {len(output_complete_models)} complete PROCESSED models found.")
+print(f"         {len(models_to_process)} unique models require processing.")
+print(f"         Resulting in {len(tasks_to_run)} files to process.")
+print("=" * 80)
+
+if not tasks_to_run:
+    print("\n✅ Execution halted: All required files have either been processed or are incomplete in the raw data.")
     exit(0)
 
-complete_models = get_complete_models(results)
-print(f"\nComplete models to process: {len(complete_models)}")
-print(complete_models)
-
-# Jobmon setup
 user = getpass.getuser()
-
 log_dir = Path("/mnt/team/idd/pub/")
 log_dir.mkdir(parents=True, exist_ok=True)
 stdout_dir = log_dir / "stdout"
@@ -65,7 +96,6 @@ stderr_dir = log_dir / "stderr"
 stdout_dir.mkdir(parents=True, exist_ok=True)
 stderr_dir.mkdir(parents=True, exist_ok=True)
 
-# Project
 project = "proj_rapidresponse"
 queue = 'all.q'
 
@@ -73,87 +103,92 @@ wf_uuid = uuid.uuid4()
 tool_name = f"{package_name}_fill_and_split_tool"
 tool = Tool(name=tool_name)
 
-# Create a workflow
 workflow = tool.create_workflow(
     name=f"{tool_name}_workflow_{wf_uuid}",
     max_concurrently_running=10000,
 )
 
-# Compute resources
 workflow.set_default_compute_resources_from_dict(
     cluster_name="slurm",
     dictionary={
-        "memory": "15G",
+        "memory": "15G", 
         "cores": 1,
         "runtime": "5m",
         "queue": queue,
         "project": project,
-        # "stdout": str(stdout_dir),
-        # "stderr": str(stderr_dir),
     }
 )
 
-# Define the task template
 task_template = tool.get_task_template(
     template_name="fill_and_yearly_split",
     default_cluster_name="slurm",
     default_compute_resources={
-        "memory": "30G",
-        "cores": 4,
-        "runtime": "5m",
+        "memory": "8G",
+        "cores": 1,
+        "runtime": "10m",
         "queue": queue,
         "project": project,
-        # "stdout": str(stdout_dir),
-        # "stderr": str(stderr_dir),
     },
     command_template=(
         "python {script_root}/fill_and_yearly_split.py "
+        "--data_source {{data_source}} "
         "--model {{model}} "
         "--variant {{variant}} "
         "--scenario {{scenario}} "
         "--variable {{variable}} "
         "--grid {{grid}} "
-        "--time_period {{time_period}} "
+        "--frequency {{frequency}} "
         "--file_path {{file_path}} "
-        "--fill_missing_years {{fill_missing_years}}"
-    ).format(script_root=SCRIPT_ROOT),
-    node_args=["model", "variant", "scenario", "variable", "grid", "time_period", "file_path", "fill_missing_years"],
-    task_args=[],
+        "--fill_required {{fill_required}}"
+    ).format(script_root=SCRIPT_ROOT), 
+    node_args=[
+        "data_source", "model", "variant", "scenario", 
+        "variable", "grid", "frequency", "file_path", 
+        "fill_required"
+    ],
+    task_args=[], 
     op_args=[],
 )
 
-# Add tasks
 print("\n" + "=" * 80)
-print("STEP 3: Creating Jobmon tasks")
+print("STEP 3: Creating Jobmon tasks (Dynamic Resources)")
 print("=" * 80)
 tasks = []
-for model in complete_models:
-    variants = results[model]['variants']
-    for variant in variants:
-        scenarios = variants[variant]['scenarios']
-        for scenario in scenarios:
-            variables = scenarios[scenario]['variables']
-            for variable in variables:
-                grids = variables[variable]['grids']
-                for grid in grids:
-                    time_periods = grids[grid]['time_periods']
-                    for time_period in time_periods:
-                        files_metadata = time_periods[time_period]['files']
-                        for file_meta in files_metadata:
-                            task = task_template.create_task(
-                                model=model,
-                                variant=variant,
-                                scenario=scenario,
-                                variable=variable,
-                                grid=grid,
-                                time_period=time_period,
-                                file_path=file_meta['path'],
-                                fill_missing_years=file_meta['fill_required']
-                            )
-                            tasks.append(task)
+
+for file_data in tasks_to_run:
+    full_file_path = Path(file_data['file_path'])
+    try:
+        file_size_gb = get_file_size_gb(full_file_path)
+    except FileNotFoundError:
+        print(f"Skipping task: File not found at {full_file_path}")
+        continue
+    resource_request = get_resource_tier(file_size_gb)
+    print(f"File: {full_file_path.name} ({file_size_gb:.2f} GB) -> Requesting Mem: {resource_request['memory']}, Run: {resource_request['runtime']}")
+    task = task_template.create_task(
+        compute_resources={
+            "memory": resource_request["memory"],
+            "cores": resource_request["cores"],
+            "runtime": resource_request["runtime"],
+            "queue": queue,
+            "project": project,
+        },
+        data_source=DATA_SOURCE,
+        model=file_data['model'],
+        variant=file_data['variant'],
+        scenario=file_data['scenario'],
+        variable=file_data['variable'],
+        grid=file_data['grid'],
+        frequency=file_data['frequency'],
+        file_path=file_data['file_path'],
+        fill_required=file_data['fill_required']
+    )
+    tasks.append(task)
 
 print(f"Number of tasks to run: {len(tasks)}")
 
+if TEST_MODE:
+    print("\n✅ TEST MODE is ON. Exiting before running the workflow.")
+    exit(0)
 if tasks:
     workflow.add_tasks(tasks)
     print("✅ Tasks successfully added to workflow.")
