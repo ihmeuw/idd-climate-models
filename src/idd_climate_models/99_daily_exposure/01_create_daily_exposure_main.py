@@ -408,7 +408,7 @@ def save_daily_exposure_rasters(
 
     for severity, day_dict in severity_daily_exposures.items():
         severity_dir = save_dir / severity
-        severity_dir.mkdir(exist_ok=True)
+        severity_dir.mkdir(exist_ok=True, parents=True)
 
         for day_str, da in day_dict.items():
             da = da.astype(np.float32)
