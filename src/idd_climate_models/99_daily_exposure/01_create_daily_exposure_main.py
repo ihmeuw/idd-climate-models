@@ -36,13 +36,15 @@ def read_custom_tracks(
     """
     Read tc risk model outputs for CLIMADA processing.
     """
+    start_year = batch_year.split("_")[0]
+    end_year = batch_year.split("_")[1] 
     if draw == 0:
-        file_name = f"tracks_{basin}_{model}_{scenario}_{variant}_{batch_year}.nc"
+        file_name = f"tracks_{basin}_{model}_{scenario}_{variant}_{start_year}01_{end_year}12.nc"
     else:
         draw = draw - 1
         file_name = f"tracks_{basin}_{model}_{scenario}_{variant}_{batch_year}_e{draw}.nc"
 
-    file_path = root_path / model / variant / scenario / batch_year / file_name
+    file_path = root_path / model / variant / scenario / batch_year / basin / file_name
 
     ds_custom = xr.open_dataset(file_path)
 
