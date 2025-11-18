@@ -50,47 +50,60 @@ def read_custom_tracks(
 
     return ds_custom
 
-def prepare_minimal_tctracks_from_custom(ds_custom: xr.Dataset) -> TCTracks:
+def prepare_minimal_tctracks_from_custom(ds_custom):
     """
     Convert custom synthetic tracks with time in seconds and per-track
     year/month info into a TCTracks object compatible with
     TropCyclone.from_tracks().
-
-    Computes:
-    - Category from maximum sustained wind
-    - orig_event_flag set to True
-    - Normalizes lon/lat to valid ranges
-    - Trims trailing NaNs
     """
+
     storms = []
     n_trk = ds_custom.sizes["n_trk"]
     raw_time = ds_custom["time"].values  # seconds since start
 
-    # compute time step in hours
+    # Compute time step in hours
     if len(raw_time) > 1:
         dt_hours = np.diff(raw_time).mean() / 3600.0
     else:
         dt_hours = 1.0
 
+    # Prepare container for datetime arrays
+    tracks_time = []
+
+    # ----------------------------------------------------
+    # First loop: compute datetime arrays
+    # ----------------------------------------------------
     for i in range(n_trk):
-        # ------------------------------------------
-        # Build real datetime axis for this storm
-        # ------------------------------------------
+
         start_year = int(ds_custom["tc_years"][i].item())
         start_month = int(ds_custom["tc_month"][i].item())
-        start_date = np.datetime64(dt.datetime(start_year, start_month, 1, 0, 0))
-        time_dt = start_date + raw_time.astype("timedelta64[s]")
 
-        # Extract variables
+        start_date = np.datetime64(f"{start_year:04d}-{start_month:02d}-01T00:00", "s")
+
+        if raw_time.ndim == 2:
+            time_seconds = raw_time[i].astype("timedelta64[s]")
+        else:
+            time_seconds = raw_time.astype("timedelta64[s]")
+
+        time_dt = start_date + time_seconds
+        time_dt = time_dt.astype("datetime64[h]")
+
+        tracks_time.append(time_dt)
+
+    # ----------------------------------------------------
+    # Second loop: build each storm dataset
+    # ----------------------------------------------------
+    for i in range(n_trk):
+
         lon = ds_custom["lon_trks"][i].values
         lat = ds_custom["lat_trks"][i].values
         vmax = ds_custom["vmax_trks"][i].values
         cp = ds_custom["m_trks"][i].values
         env = cp + 20.0
 
-        # ------------------------------------------
+        time_dt = tracks_time[i]
+
         # Trim NaNs
-        # ------------------------------------------
         valid_idx = np.isfinite(lon) & np.isfinite(lat)
         lon = lon[valid_idx]
         lat = lat[valid_idx]
@@ -100,13 +113,12 @@ def prepare_minimal_tctracks_from_custom(ds_custom: xr.Dataset) -> TCTracks:
         time_dt = time_dt[valid_idx]
         n_time = len(lon)
 
-        # ------------------------------------------
-        # Normalize coordinates
-        # ------------------------------------------
-        lon = ((lon + 180) % 360) - 180  # normalize to [-180, 180]
+        if n_time == 0:
+            continue  # skip empty storms safely
+
+        lon = ((lon + 180) % 360) - 180
         lat = np.clip(lat, -90, 90)
 
-        # Compute max wind for category
         vmax_max = vmax.max().item()
         category = (
             0 if vmax_max < 33 else
