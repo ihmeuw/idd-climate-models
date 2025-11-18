@@ -404,7 +404,7 @@ def save_daily_exposure_rasters(
     Save daily exposure rasters for each severity level to GeoTIFF files using rioxarray
     """
 
-    save_dir = output_dir / model / variant / scenario / basin / draw
+    save_dir = output_dir / model / variant / scenario / basin / str(draw)
 
     for severity, day_dict in severity_daily_exposures.items():
         severity_dir = save_dir / severity
