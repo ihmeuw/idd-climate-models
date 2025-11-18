@@ -1,15 +1,54 @@
-
 from climada.hazard import TCTracks, TropCyclone, Centroids  # type: ignore
 import xarray as xr  # type: ignore
 import numpy as np # type: ignore
 import re
 from pathlib import Path
-import rasterra as rt # type: ignore
 import os
 import datetime as dt
+import argparse
 
 
-def prepare_minimal_tctracks_from_custom(ds_custom) -> TCTracks:
+# Create the argument parser
+parser = argparse.ArgumentParser(description="Run CLIMADA model on tc_risk model outputs")
+
+parser.add_argument("--root_path", type=Path, required=True, help="Root path to tc_risk model outputs")
+parser.add_argument("--model", type=str, required=True, help="Model name")
+parser.add_argument("--variant", type=str, required=True, help="Variant name")
+parser.add_argument("--scenario", type=str, required=True, help="Scenario name")
+parser.add_argument("--batch_year", type=str, required=True, help="Batch year")
+parser.add_argument("--basin", type=str, required=True, help="Tropical cyclone basin")
+parser.add_argument("--draw", type=str, required=True, help="Draw number or 'all'")
+parser.add_argument("--resolution", type=float, required=True, help="Spatial resolution for centroids")
+parser.add_argument("--output_dir", type=Path, required=True, help="Output directory for daily exposure rasters")
+
+# Parse arguments
+args = parser.parse_args()
+
+def read_custom_tracks(
+    root_path: Path,
+    model: str,
+    variant: str,
+    scenario: str,
+    batch_year: str,
+    basin: str,
+    draw: int,
+) -> TCTracks:
+    """
+    Read tc risk model outputs for CLIMADA processing.
+    """
+    if draw == 0:
+        file_name = f"tracks_{basin}_{model}_{scenario}_{variant}_{batch_year}.nc"
+    else:
+        draw = draw - 1
+        file_name = f"tracks_{basin}_{model}_{scenario}_{variant}_{batch_year}_e{draw}.nc"
+
+    file_path = root_path / model / variant / scenario / batch_year / file_name
+
+    ds_custom = xr.open_dataset(file_path)
+
+    return ds_custom
+
+def prepare_minimal_tctracks_from_custom(ds_custom: xr.Dataset) -> TCTracks:
     """
     Convert custom synthetic tracks with time in seconds and per-track
     year/month info into a TCTracks object compatible with
@@ -106,7 +145,7 @@ def prepare_minimal_tctracks_from_custom(ds_custom) -> TCTracks:
     return TCTracks(data=storms)
 
     
-def normalize_lon(lon):
+def normalize_lon(lon: float) -> float:
     """Normalize longitude to [-180, 180] range."""
     lon = ((lon + 180) % 360) - 180
     return lon
@@ -123,7 +162,7 @@ def generate_basin_centroids(basin: str, res: float = 0.1) -> "Centroids":
         'NI': ['30E', '0N', '100E', '50N'],
         'SI': ['20E', '45S', '100E', '0S'],
         'AU': ['100E', '45S', '180E', '0S'],
-        'SA': ['180E', '45S', '250E', '0S'], # Original SA - possible mismatch
+        'SP': ['180E', '45S', '250E', '0S'], # Original SA - possible mismatch
         'WP': ['100E', '0N', '180E', '60N'],
         'GL': ['0E', '90S', '360E', '90N']
     }
@@ -131,7 +170,7 @@ def generate_basin_centroids(basin: str, res: float = 0.1) -> "Centroids":
     if basin not in basin_bounds:
         raise ValueError(f"Basin '{basin}' not recognized. Available: {list(basin_bounds.keys())}")
 
-    def parse_coord(coord_str):
+    def parse_coord(coord_str: str) -> float:
         """Convert coordinate string with direction to float degrees."""
         match = re.match(r"([0-9\.]+)([ENWS])", coord_str)
         if not match:
@@ -298,6 +337,8 @@ def generate_exposure_for_severity_from_storms(
 ) -> dict[str, dict[str, xr.DataArray]]:
     """
     Generate daily exposure rasters from per-storm wind speed datasets for each severity category.
+
+    Handles cases where no tracks exist for a given severity by inserting an empty dict.
     """
 
     # Step 1: Generate centroids for the basin
@@ -311,37 +352,48 @@ def generate_exposure_for_severity_from_storms(
         "severe": severe_tracks,
     }
 
+
     severity_daily_exposures = {}
 
     # Step 3: Iterate over severity levels
     for severity_name, severity_track in severity_map.items():
-        print(f"🌀 Processing {severity_name.upper()} cyclones ({len(severity_track.data)} tracks)...")
 
-        # Skip if no tracks
-        if len(severity_track.data) == 0:
-            print(f"⚠️ No tracks found for {severity_name} — skipping.")
+        # Handle None or empty tracks
+        if severity_track is None or len(severity_track.data) == 0:
+            print(f"⚠️ No tracks found for {severity_name} — inserting empty entry.")
+            severity_daily_exposures[severity_name] = {}  # empty dict
             continue
+
+        print(f"🌀 Processing {severity_name.upper()} cyclones ({len(severity_track.data)} tracks)...")
 
         # Step 3.2: Generate per-storm wind speed datasets (list of xr.DataArrays)
         storm_list = generate_hazard_per_storm(severity_track, centroids)
 
         # Step 3.3: Compute daily exposure rasters using the storm list
-        daily_exposures = compute_daily_exposure_from_storm_list(
-            storm_list,
-        )
+        daily_exposures = compute_daily_exposure_from_storm_list(storm_list)
 
         severity_daily_exposures[severity_name] = daily_exposures
 
     return severity_daily_exposures
 
-def save_daily_exposure_rasters(severity_daily_exposures: dict, output_dir: Path):
+
+def save_daily_exposure_rasters(
+        severity_daily_exposures: dict, 
+        output_dir: Path,
+        model: str,
+        variant: str,
+        scenario: str,
+        basin: str,
+        draw: int | str,
+        ):
     """
     Save daily exposure rasters for each severity level to GeoTIFF files using rioxarray
     """
-    output_dir.mkdir(parents=True, exist_ok=True)
+
+    save_dir = output_dir / model / variant / scenario / basin / draw
 
     for severity, day_dict in severity_daily_exposures.items():
-        severity_dir = output_dir / severity
+        severity_dir = save_dir / severity
         severity_dir.mkdir(exist_ok=True)
 
         for day_str, da in day_dict.items():
@@ -359,7 +411,7 @@ def save_daily_exposure_rasters(severity_daily_exposures: dict, output_dir: Path
             da_rio = da.rename({"lat": "y", "lon": "x"})
 
             # Save GeoTIFF
-            save_name = f"{day_str}_{severity}"
+            save_name = f"{day_str}_exposure_hours"
             out_path = severity_dir / f"{save_name}.tif"
             da_rio.rio.to_raster(out_path)
 
@@ -368,14 +420,34 @@ def save_daily_exposure_rasters(severity_daily_exposures: dict, output_dir: Path
             print(f"💾 Saved: {out_path}")
 
 def generate_and_save_daily_exposure_rasters(
-    tc_tracks: TCTracks,
+    root_path: Path,
+    model: str,
+    variant: str,
+    scenario: str,
+    batch_year: str,
     basin: str,
+    draw: int | str,
     resolution: float,
-    output_dir: str,
+    output_dir: Path,
 ):
     """
     Generate and save daily exposure rasters for each severity category.
     """
+
+    # Step 1: Read in custom tracks from tc_risk model
+    ds_custom = read_custom_tracks(
+        root_path,
+        model,
+        variant,
+        scenario,
+        batch_year,
+        basin,
+        draw,
+    )
+
+    # Step 2: Prepare TCTracks object
+    tc_tracks = prepare_minimal_tctracks_from_custom(ds_custom)
+
 
     # Generate daily exposure rasters
     severity_daily_exposures = generate_exposure_for_severity_from_storms(
@@ -385,4 +457,24 @@ def generate_and_save_daily_exposure_rasters(
     )
 
     # Save rasters to disk
-    save_daily_exposure_rasters(severity_daily_exposures, output_dir)
+    save_daily_exposure_rasters(
+        severity_daily_exposures, 
+        output_dir,
+        model,
+        variant,
+        scenario,
+        basin,
+        draw,
+    )
+
+generate_and_save_daily_exposure_rasters(
+    root_path=args.root_path,
+    model=args.model,
+    variant=args.variant,
+    scenario=args.scenario,
+    batch_year=args.batch_year,
+    basin=args.basin,
+    draw=args.draw,
+    resolution=args.resolution,
+    output_dir=args.output_dir,
+)
