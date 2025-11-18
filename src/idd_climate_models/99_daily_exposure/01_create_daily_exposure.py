@@ -1,52 +1,111 @@
-from climada.hazard import TCTracks, TropCyclone, Centroids
-import xarray as xr
-import numpy as np
+
+from climada.hazard import TCTracks, TropCyclone, Centroids  # type: ignore
+import xarray as xr  # type: ignore
+import numpy as np # type: ignore
 import re
 from pathlib import Path
-import rasterra as rt
+import rasterra as rt # type: ignore
 import os
+import datetime as dt
 
 
-def prepare_custom_tctracks(ds_list: list[xr.Dataset]) -> TCTracks:
+def prepare_minimal_tctracks_from_custom(ds_custom) -> TCTracks:
     """
-    Convert custom xarray Datasets into a TCTracks object by filling in missing attributes and data variables.
+    Convert custom synthetic tracks with time in seconds and per-track
+    year/month info into a TCTracks object compatible with
+    TropCyclone.from_tracks().
+
+    Computes:
+    - Category from maximum sustained wind
+    - orig_event_flag set to True
+    - Normalizes lon/lat to valid ranges
+    - Trims trailing NaNs
     """
-    prepared_list = []
+    storms = []
+    n_trk = ds_custom.sizes["n_trk"]
+    raw_time = ds_custom["time"].values  # seconds since start
 
-    for ds in ds_list:
-        # Fill missing attrs
-        attrs_defaults = {
-            "name": "CUSTOM_STORM",
-            "sid": 0,
-            "category": -1,
-            "orig_event_flag": True,
-            "data_provider": "custom",
-            "id_no": 0,
-            "max_sustained_wind_unit": "kn",
-            "central_pressure_unit": "mb"
-        }
-        for k, v in attrs_defaults.items():
-            if k not in ds.attrs:
-                ds.attrs[k] = v
+    # compute time step in hours
+    if len(raw_time) > 1:
+        dt_hours = np.diff(raw_time).mean() / 3600.0
+    else:
+        dt_hours = 1.0
 
-        # Fill missing data_vars
-        n_time = len(ds.time)
-        data_defaults = {
-            "radius_max_wind": np.zeros(n_time),
-            "radius_oci": np.zeros(n_time),
-            "max_sustained_wind": np.zeros(n_time),
-            "central_pressure": np.zeros(n_time),
-            "environmental_pressure": np.zeros(n_time),
-            "basin": np.array(["CUSTOM"]*n_time)
-        }
-        for var, val in data_defaults.items():
-            if var not in ds.data_vars:
-                ds[var] = xr.DataArray(val, coords={"time": ds.time}, dims=["time"])
+    for i in range(n_trk):
+        # ------------------------------------------
+        # Build real datetime axis for this storm
+        # ------------------------------------------
+        start_year = int(ds_custom["tc_years"][i].item())
+        start_month = int(ds_custom["tc_month"][i].item())
+        start_date = np.datetime64(dt.datetime(start_year, start_month, 1, 0, 0))
+        time_dt = start_date + raw_time.astype("timedelta64[s]")
 
-        prepared_list.append(ds)
+        # Extract variables
+        lon = ds_custom["lon_trks"][i].values
+        lat = ds_custom["lat_trks"][i].values
+        vmax = ds_custom["vmax_trks"][i].values
+        cp = ds_custom["m_trks"][i].values
+        env = cp + 20.0
 
-    return TCTracks(data=prepared_list)
+        # ------------------------------------------
+        # Trim NaNs
+        # ------------------------------------------
+        valid_idx = np.isfinite(lon) & np.isfinite(lat)
+        lon = lon[valid_idx]
+        lat = lat[valid_idx]
+        vmax = vmax[valid_idx]
+        cp = cp[valid_idx]
+        env = env[valid_idx]
+        time_dt = time_dt[valid_idx]
+        n_time = len(lon)
 
+        # ------------------------------------------
+        # Normalize coordinates
+        # ------------------------------------------
+        lon = ((lon + 180) % 360) - 180  # normalize to [-180, 180]
+        lat = np.clip(lat, -90, 90)
+
+        # Compute max wind for category
+        vmax_max = vmax.max().item()
+        category = (
+            0 if vmax_max < 33 else
+            1 if vmax_max < 43 else
+            2 if vmax_max < 50 else
+            3 if vmax_max < 58 else
+            4 if vmax_max < 70 else
+            5
+        )
+
+        ds = xr.Dataset(
+            coords={"time": time_dt},
+            data_vars={
+                "lon": (("time",), lon),
+                "lat": (("time",), lat),
+                "max_sustained_wind": (("time",), vmax),
+                "central_pressure": (("time",), cp),
+                "environmental_pressure": (("time",), env),
+                "basin": (("time",), np.repeat(ds_custom["tc_basins"][i].item(), n_time)),
+                "radius_max_wind": (("time",), np.zeros(n_time)),
+                "radius_oci": (("time",), np.zeros(n_time)),
+                "time_step": (("time",), np.full(n_time, dt_hours)),
+            },
+            attrs={
+                "name": f"CUSTOM_{i}",
+                "sid": int(i),
+                "id_no": int(i),
+                "category": category,
+                "orig_event_flag": True,
+                "data_provider": "custom",
+                "max_sustained_wind_unit": "kn",
+                "central_pressure_unit": "mb",
+            }
+        )
+
+        storms.append(ds)
+
+    return TCTracks(data=storms)
+
+    
 def normalize_lon(lon):
     """Normalize longitude to [-180, 180] range."""
     lon = ((lon + 180) % 360) - 180
@@ -256,9 +315,11 @@ def generate_exposure_for_severity_from_storms(
 
     # Step 3: Iterate over severity levels
     for severity_name, severity_track in severity_map.items():
+        print(f"🌀 Processing {severity_name.upper()} cyclones ({len(severity_track.data)} tracks)...")
 
         # Skip if no tracks
         if len(severity_track.data) == 0:
+            print(f"⚠️ No tracks found for {severity_name} — skipping.")
             continue
 
         # Step 3.2: Generate per-storm wind speed datasets (list of xr.DataArrays)
@@ -304,12 +365,13 @@ def save_daily_exposure_rasters(severity_daily_exposures: dict, output_dir: Path
 
             # Optional: set file permissions
             os.chmod(out_path, 0o775)
+            print(f"💾 Saved: {out_path}")
 
 def generate_and_save_daily_exposure_rasters(
     tc_tracks: TCTracks,
     basin: str,
     resolution: float,
-    output_dir: Path,
+    output_dir: str,
 ):
     """
     Generate and save daily exposure rasters for each severity category.
@@ -323,4 +385,4 @@ def generate_and_save_daily_exposure_rasters(
     )
 
     # Save rasters to disk
-    save_daily_exposure_rasters(severity_daily_exposures, Path(output_dir))
+    save_daily_exposure_rasters(severity_daily_exposures, output_dir)
