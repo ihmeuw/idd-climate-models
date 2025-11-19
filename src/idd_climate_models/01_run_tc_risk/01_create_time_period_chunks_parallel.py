@@ -10,7 +10,7 @@ from pathlib import Path
 import idd_climate_models.constants as rfc
 from idd_climate_models.io_compare_utils import compare_model_validation
 from idd_climate_models.dictionary_utils import parse_results
-from idd_climate_models.resource_functions import get_rep_file_size_gb, get_resource_tier
+from idd_climate_models.resource_functions import get_rep_file_size_gb, get_resource_info
 
 # --- CONSTANT DEFINITIONS (from rfc) ---
 repo_name = rfc.repo_name
@@ -21,10 +21,10 @@ TC_RISK_INPUT_PATH = rfc.TC_RISK_INPUT_PATH
 SCRIPT_ROOT = rfc.REPO_ROOT / repo_name / "src" / package_name / "01_run_tc_risk"
 
 # Configuration
+
 DATA_SOURCE = "cmip6"
 BIN_SIZE_YEARS = 20
-DRY_RUN = False # Assuming DRY_RUN is generally False for submission
-RERUN = False
+VERBOSE = True
 
 
 INPUT_DATA_TYPE = "data"
@@ -51,6 +51,10 @@ validation_info = compare_model_validation(
 models_to_process = validation_info["models_to_process"]
 model_variants_to_run = parse_results(validation_info["models_to_process_dict"], 'variant')
 
+if not model_variants_to_run:
+    print("✅ All jobs are processed. No tasks to run.")
+    sys.exit(0)
+    
 # Get the full hierarchy list to build the variable detail map
 full_path_list = parse_results(validation_info["models_to_process_dict"], 'all')
 variable_detail_map = {}
@@ -131,7 +135,7 @@ folder_template = tool.get_task_template(
         "project": project,
     },
     command_template=(
-        "python {script_root}/a_create_tc_risk_input_folder.py "
+        "python {script_root}/1a_create_tc_risk_input_folder.py "
         "--data_source {{data_source}} " 
         "--model {{model}} "
         "--variant {{variant}} " 
@@ -155,7 +159,7 @@ process_template = tool.get_task_template(
         "project": project,
     },
     command_template=(
-        "python {script_root}/b_process_time_chunk.py "
+        "python {script_root}/1b_process_time_chunk.py "
         "--data_source {{data_source}} "
         "--model {{model}} "
         "--variant {{variant}} "
@@ -164,8 +168,9 @@ process_template = tool.get_task_template(
         "--variable {{variable}} "
         "--grid {{grid}} "
         "--frequency {{frequency}} "
+        "--needs_regridding_str {{needs_regridding_str}} "
     ).format(script_root=SCRIPT_ROOT),
-    node_args=["data_source", "model", "variant", "scenario", "time_bin", "variable", "grid", "frequency"],
+    node_args=["data_source", "model", "variant", "scenario", "time_bin", "variable", "grid", "frequency", "needs_regridding_str"],
     task_args=[],
     op_args=[],
 )
@@ -218,9 +223,10 @@ for mv_info in model_variants_to_run:
                 
                 # 1. CONSTRUCT PATH TO A REPRESENTATIVE INPUT FILE
                 source_file_dir = PROCESSED_DATA_PATH / DATA_SOURCE / model_name / variant_name / scenario / variable / details['grid'] / details['frequency']
-                resource_request = get_resource_tier(get_rep_file_size_gb(file_path=source_file_dir, representative='first') * BIN_SIZE_YEARS)
-                print(f"Variable: {variable} | Model: {model_name} | Variant: {variant_name} | Scenario: {scenario} | Time Bin: {time_bin_str} ->" )
-                print(f"        Requesting Mem: {resource_request['memory']}, Run: {resource_request['runtime']}, Cores: {resource_request['cores']}")
+                resource_request, needs_regridding = get_resource_info(file_path=source_file_dir, representative='first', num_files = BIN_SIZE_YEARS)
+                if VERBOSE:
+                    print(f"Variable: {variable} | Model: {model_name} | Variant: {variant_name} | Scenario: {scenario} | Time Bin: {time_bin_str} ->" )
+                    print(f"        Requesting Mem: {resource_request['memory']}, Run: {resource_request['runtime']}, Cores: {resource_request['cores']}, Regridding: {needs_regridding}")
                 # --- TASK CREATION ---
                 process_task = process_template.create_task(
                     # Inject dynamic resources here
@@ -239,6 +245,7 @@ for mv_info in model_variants_to_run:
                     variable = variable,
                     grid = details['grid'],
                     frequency = details['frequency'],
+                    needs_regridding_str=str(needs_regridding),
                 )
                 
                 process_tasks.append(process_task)

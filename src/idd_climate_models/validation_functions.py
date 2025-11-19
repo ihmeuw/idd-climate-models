@@ -12,9 +12,11 @@ from idd_climate_models.constants import select_priority_grid, GRID_PRIORITY_ORD
 from idd_climate_models.dictionary_utils import snip_validation_results
 
 FOLDER_STRUCTURE = rfc.FOLDER_STRUCTURE
-VALIDATION_RULES = rfc.VALIDATION_RULES
+# VALIDATION_RULES = rfc.VALIDATION_RULES
 MODEL_ROOT = rfc.MODEL_ROOT
 
+build_tc_risk_rules = rfc.build_tc_risk_rules
+DATA_RULES = rfc.DATA_RULES
 # CRITICAL FIX: Only flag 'ncells' as forbidden, as 'vertices' is used by structured grids.
 FORBIDDEN_UNSTRUCTURED_DIMS = {'ncells'}
 
@@ -22,14 +24,15 @@ FORBIDDEN_UNSTRUCTURED_DIMS = {'ncells'}
 # UTILITY FUNCTIONS
 # ============================================================================
 
-def create_validation_dict(DATA_TYPE, IO_TYPE_RAW, DATA_SOURCE, validation_results = None, strict_grid_check=False):
+def create_validation_dict(DATA_TYPE, IO_DATA_TYPE, DATA_SOURCE, validation_results = None, strict_grid_check=False):
     """Adds the strict_grid_check flag to the validation dictionary."""
+    depth = -1 if IO_DATA_TYPE == 'output' and DATA_TYPE == 'tc_risk' else -2
     validation_dict = {
         'data_type': DATA_TYPE,
-        'io_data_type': IO_TYPE_RAW,
+        'io_data_type': IO_DATA_TYPE,
         'data_source': DATA_SOURCE,
-        'folder_structure': FOLDER_STRUCTURE[DATA_TYPE],
-        'detail_level': FOLDER_STRUCTURE[DATA_TYPE][-2],
+        'folder_structure': FOLDER_STRUCTURE[DATA_TYPE][IO_DATA_TYPE],
+        'detail_level': FOLDER_STRUCTURE[DATA_TYPE][IO_DATA_TYPE][depth],
         'strict_grid_check': strict_grid_check # <-- FLAG ADDED
     }
     if validation_results is not None:
@@ -424,10 +427,49 @@ def validate_time_period_level(path, context, time_folder_name, rules):
         'issues': issues
     }
 
+def validate_basin_level(path, context, basin_folder_name, rules):
+    """
+    Validate the 'basin' level for TC_RISK (folder must contain NUM_DRAWS .nc files).
+    """
+    issues = []
+    
+    # Get the expected variables for this data source (e.g., cmip6)
+    data_source = context.get('data_source', 'cmip6')
+    # Fetch the required variables from your constants file
+    required_variables = rfc.VARIABLES.get(data_source, [])
+    
+    # 1. Get NetCDF files
+    try:
+        nc_files = sorted([f for f in os.listdir(path) if f.endswith('.nc')])
+    except OSError as e:
+        return {'complete': False, 'issues': [f"Cannot read directory: {e}"]}
+
+    # 2. Count the number of draw files
+    num_draws_found = len(nc_files)
+    if basin_folder_name == 'GL':
+        if num_draws_found != 0:
+            issues.append(f"Expected 0 draw files, found {num_draws_found}.")
+    else:
+        if num_draws_found < rfc.NUM_DRAWS:
+            issues.append(f"Expected at least {rfc.NUM_DRAWS} draw files, found {num_draws_found}.")
+
+    
+    
+
+    # 4. Determine Final Completion Status
+    is_complete = not issues
+    
+    return {
+        'complete': is_complete,
+        'files': nc_files, 
+        'issues': issues
+    }
+
 VALIDATION_FUNCTION_MAP = {
     'frequency_file_validator': validate_frequency_level,
     'time_period_file_validator': validate_time_period_level,
     'grid_structure_checker': check_grid_structure,
+    'basin_level_validator': validate_basin_level
 }
 
 
@@ -468,11 +510,11 @@ def check_folder_rules(level, children, rules, data_source):
 
     return issues
 
-def _determine_next_level(level, data_type):
+def _determine_next_level(level, data_type, io_data_type):
     """
     STEP 2: Dynamically determine the next level in the hierarchy.
     """
-    level_order = FOLDER_STRUCTURE.get(data_type, [])
+    level_order = FOLDER_STRUCTURE.get(data_type, {}).get(io_data_type, [])
     try:
         current_idx = level_order.index(level)
         return level_order[current_idx + 1] if current_idx < len(level_order) - 1 else None
@@ -510,11 +552,15 @@ def _filter_children_by_priority(level, children_names, rules):
     return children_to_validate, children_results_placeholders, priority_issues
 
 
-def validate_level(path, level, context, data_type, data_source):
+def validate_level(path, level, context, data_type, io_data_type, data_source):
     """
     The main recursive dispatcher function.
     """
-
+    TC_RISK_RULES = build_tc_risk_rules(io_data_type)
+    VALIDATION_RULES = {
+        'data': DATA_RULES,
+        'tc_risk': TC_RISK_RULES
+    }
     rules = VALIDATION_RULES[data_type][level]
     child_dict_name = rules.get('child_name', 'children')
     children_names, issues = get_subfolders(path)
@@ -530,7 +576,7 @@ def validate_level(path, level, context, data_type, data_source):
     issues.extend(folder_issues)
 
     # --- Step 2: Determine Next Level ---
-    next_level = _determine_next_level(level, data_type)
+    next_level = _determine_next_level(level, data_type, io_data_type)
         
     # --- Step 3: Filter Children (Priority Grid Logic) ---
     children_to_validate, children, priority_issues = _filter_children_by_priority(
@@ -557,6 +603,7 @@ def validate_level(path, level, context, data_type, data_source):
                 next_level,
                 new_context,
                 data_type,
+                io_data_type,
                 child_name,
                 data_source # <-- PASS data_source
             )
@@ -574,13 +621,19 @@ def validate_level(path, level, context, data_type, data_source):
     return result   
 
 
-def validate_next_level(child_path, next_level, new_context, data_type, child_name, data_source):
+def validate_next_level(child_path, next_level, new_context, data_type, io_data_type, child_name, data_source):
     """
     Dispatches validation to the correct function (specialized handler or recursive call).
     """
+    
+    TC_RISK_RULES = build_tc_risk_rules(io_data_type)
+    VALIDATION_RULES = {
+        'data': DATA_RULES,
+        'tc_risk': TC_RISK_RULES
+    }
     next_rules = VALIDATION_RULES[data_type][next_level]
     handler_key = next_rules.get('handler')
-    
+
     if handler_key:
         special_handler = VALIDATION_FUNCTION_MAP.get(handler_key)
         if special_handler is None:
@@ -591,7 +644,7 @@ def validate_next_level(child_path, next_level, new_context, data_type, child_na
         child_result = special_handler(child_path, new_context, child_name, next_rules)
     else:
         # Recursive call: Must pass data_source again
-        child_result = validate_level(child_path, next_level, new_context, data_type, data_source)
+        child_result = validate_level(child_path, next_level, new_context, data_type, io_data_type, data_source)
         
     return child_result
 
@@ -638,7 +691,7 @@ def log_validation_results(validation_dict, detail_level='variant'):
 # FINAL WRAPPER FUNCTIONS
 # ============================================================================
 
-def validate_model_in_source(model_name, source_path, data_type, data_source, strict_grid_check=False):
+def validate_model_in_source(model_name, source_path, data_type, io_data_type, data_source, strict_grid_check=False):
     """
     Validates a single climate model's structure.
     This wrapper now accepts and passes the strict_grid_check flag.
@@ -661,6 +714,7 @@ def validate_model_in_source(model_name, source_path, data_type, data_source, st
         level=initial_level,
         context=initial_context, # Passes context with the strict_grid_check flag
         data_type=data_type,
+        io_data_type=io_data_type,
         data_source=data_source # Passes data_source as separate argument
     )
 
@@ -707,6 +761,7 @@ def validate_all_models_in_source(validation_dict, verbose=True, strict_grid_che
             model_name, 
             source_path, 
             data_type, 
+            io_data_type,
             data_source,
             strict_grid_check # <-- PASSES THE FLAG
         ) 

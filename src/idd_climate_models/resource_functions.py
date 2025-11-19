@@ -2,6 +2,8 @@ import os
 from pathlib import Path
 from typing import Dict, Any
 
+from idd_climate_models.climate_file_functions import is_curvilinear_grid
+
 # ============================================================================
 # RESOURCE ESTIMATION FUNCTIONS 
 # ============================================================================
@@ -12,36 +14,50 @@ def get_file_size_gb(file_path: Path) -> float:
 
 from typing import Dict, Any
 
-def get_resource_tier(file_size_gb: float, REQUIRED_MEM_FACTOR: float = 3.0,
-                      MIN_MEM_GB: float = 8.0, MAX_MEM_GB: float = 80.0) -> Dict[str, Any]:
+def get_resource_info(
+    file_path: Path,
+    representative: str = 'first',
+    num_files: int = 1,
+    REQUIRED_MEM_FACTOR: float = 3.0,
+    GRIDDING_MULTIPLIER: float = 2.0,
+    MIN_MEM_GB: float = 8.0,
+    MAX_MEM_GB: float = 80.0
+) -> tuple[Dict[str, Any], bool]:
     """
     Allocates resources based on estimated total file size (rep_size * bin_size).
     """
     
+    file_size_gb, full_file_path = get_rep_file_size_gb(file_path=file_path, representative=representative)
+    size_gb = file_size_gb * num_files  # Total estimated size for the time bin
     # 1. Memory Calculation
-    required_mem_gb = int(file_size_gb * REQUIRED_MEM_FACTOR) + 4
+    required_mem_gb = int(size_gb * REQUIRED_MEM_FACTOR) + 4
+    needs_regridding = is_curvilinear_grid(full_file_path)
+    if needs_regridding:
+        required_mem_gb = int(required_mem_gb * GRIDDING_MULTIPLIER)
 
     final_mem_value = min(MAX_MEM_GB, max(MIN_MEM_GB, required_mem_gb))
     memory = f"{int(final_mem_value)}G"
 
     # 2. Runtime/Core Calculation (Adjusted from previous tiers for safety)
-    if file_size_gb < 100.0:
+    if final_mem_value < 100.0:
         runtime = "15m"  
         cores = 2
-    elif file_size_gb < 400.0:
+    elif final_mem_value < 400.0:
         runtime = "30m"  
         cores = 4
     else: 
         runtime = "1h"
         cores = 4
-        
-    return {
-        "memory": memory,
-        "cores": cores,
-        "runtime": runtime
-    }
 
-def get_rep_file_size_gb(file_path: Path, representative: str = 'first') -> float:
+    resource_request = {
+            "memory": memory,
+            "cores": cores,
+            "runtime": runtime
+        }
+
+    return resource_request, needs_regridding
+
+def get_rep_file_size_gb(file_path: Path, representative: str = 'first') -> tuple[float, Path]:
     """
     Gets the file size in GB for a representative file in a directory.
     """
@@ -59,4 +75,4 @@ def get_rep_file_size_gb(file_path: Path, representative: str = 'first') -> floa
     else:
         full_file_path = file_path
 
-    return get_file_size_gb(full_file_path)
+    return get_file_size_gb(full_file_path), full_file_path
