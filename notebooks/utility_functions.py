@@ -93,7 +93,7 @@ def check_coverage(date_ranges, expected_range, gap_checker_func, is_year_only=F
     actual_start, actual_end = date_ranges[0][0], date_ranges[-1][1]
 
     if is_year_only:
-        # Tighter checks for time-period (no leniency)
+        # Tighter checks for time_period (no leniency)
         if actual_start > expected_start:
             issues.append(f"Coverage starts too late: {actual_start // 100}, expected by: {expected_start // 100}")
             return False, issues

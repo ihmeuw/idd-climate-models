@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 import xarray as xr
 import numpy as np
+from typing import Any, Optional
 from xarray.backends.file_manager import FILE_CACHE
 import idd_climate_models.constants as rfc
 
@@ -12,9 +13,55 @@ import idd_climate_models.constants as rfc
 NON_STANDARD_COORDS = {'latitude': 'lat', 'longitude': 'lon'}
 # -----------------------------------------------------------------------
 
+def should_regrid(file_path, target_grid='r360x180'):
+    """
+    Check if a NetCDF file needs regridding to target grid.
+    Returns True if regridding is needed.
+    
+    Args:
+        file_path: Path to NetCDF file
+        target_grid: Target grid specification (e.g., 'r360x180' for 1°×1°)
+    
+    Returns:
+        bool: True if regridding needed, False if already on target grid
+    """
+    try:
+        ds = xr.open_dataset(Path(file_path))
+        
+        # Parse target grid to get expected dimensions
+        # r360x180 means 360 lon points, 180 lat points
+        if target_grid.startswith('r'):
+            parts = target_grid[1:].split('x')
+            target_lon = int(parts[0])
+            target_lat = int(parts[1])
+        else:
+            print(f"    ⚠️  Unknown grid format: {target_grid}")
+            ds.close()
+            return True  # Assume regridding needed
+        
+        # Check if it's already on target grid
+        has_correct_dims = (
+            'lon' in ds.dims and ds.sizes.get('lon') == target_lon and
+            'lat' in ds.dims and ds.sizes.get('lat') == target_lat
+        )
+        
+        ds.close()
+        
+        # Regrid if NOT already on target grid
+        return not has_correct_dims
+        
+    except Exception as e:
+        print(f"    ⚠️  Error checking grid: {e}")
+        return True  # Assume regridding needed if check fails
+
+
 def is_curvilinear_grid(file_path):
     """
     Check if a NetCDF file has a curvilinear grid (i/j dimensions with 2D lat/lon).
+    
+    Note: This function is kept for backwards compatibility, but should_regrid()
+    is now the preferred method as it catches both curvilinear grids AND 
+    rectangular grids with wrong dimensions.
     """
     try:
         ds = xr.open_dataset(Path(file_path))
@@ -29,12 +76,12 @@ def is_curvilinear_grid(file_path):
 
 def regrid_with_cdo(input_path, output_path, target_grid='r360x180'):
     """
-    Use CDO to regrid curvilinear grid to regular lon/lat grid.
+    Use CDO to regrid to regular lon/lat grid.
     
     Args:
-        input_path: Path to curvilinear NetCDF file
+        input_path: Path to NetCDF file
         output_path: Path for regridded output
-        target_grid: CDO grid specification (default: r360x180 = 1°x1° global)
+        target_grid: CDO grid specification (default: r360x180 = 1°×1° global)
     
     Returns:
         True if successful, False otherwise
@@ -49,7 +96,7 @@ def regrid_with_cdo(input_path, output_path, target_grid='r360x180'):
             str(output_path)
         ], check=True, capture_output=True, text=True)
         
-        print(f"    ✅ Regridded to regular grid")
+        print(f"    ✅ Regridded to {target_grid}")
         return True
         
     except subprocess.CalledProcessError as e:
@@ -59,12 +106,17 @@ def regrid_with_cdo(input_path, output_path, target_grid='r360x180'):
         print(f"    ❌ CDO not found. Install with: conda install -c conda-forge cdo")
         return False
 
+
 def fix_and_save_dataset(ds, output_path, variable, was_regridded=False, compression_level=7):
     """
     Applies coordinate normalization and saves the dataset.
     
     Args:
+        ds: xarray Dataset
+        output_path: Path for output file
+        variable: Variable name being processed
         was_regridded: If True, skip coordinate renaming (CDO already standardized names)
+        compression_level: Compression level for NetCDF output (1-9)
     """
     
     # 1. Apply Coordinate Normalization (only if NOT regridded by CDO)
@@ -114,10 +166,18 @@ def fix_and_save_dataset(ds, output_path, variable, was_regridded=False, compres
         pass
 
 
-def recombine_variable_files(file_paths, output_path, variable, compression_level=7):
+def recombine_variable_files(file_paths, output_path, variable, 
+                            target_grid='r360x180', compression_level=7):
     """
     Combine multiple NetCDF files into a single file.
-    Automatically regrids curvilinear grids to regular grids using CDO.
+    Automatically regrids to target grid if needed (checks dimensions, not just curvilinear).
+    
+    Args:
+        file_paths: List of input file paths
+        output_path: Path for combined output file
+        variable: Variable name being processed
+        target_grid: CDO grid specification (default: r360x180 = 1°×1°)
+        compression_level: Compression level for output (1-9)
     
     Returns:
         tuple: (success: bool, was_regridded: bool)
@@ -126,15 +186,16 @@ def recombine_variable_files(file_paths, output_path, variable, compression_leve
         return False, False
     
     try:
-        # Check if first file is curvilinear
-        needs_regridding = is_curvilinear_grid(file_paths[0])
+        # Check if first file needs regridding (dimension check catches both 
+        # curvilinear grids AND rectangular grids with wrong dimensions)
+        needs_regridding = should_regrid(file_paths[0], target_grid)
         
         # Regrid all files if needed
         processing_paths = file_paths
         temp_dir = None
         
         if needs_regridding:
-            print(f"    → Curvilinear grid detected, regridding {len(file_paths)} files...")
+            print(f"    → Grid mismatch detected, regridding {len(file_paths)} files to {target_grid}...")
             temp_dir = output_path.parent / f"temp_regrid_{output_path.stem}"
             temp_dir.mkdir(exist_ok=True)
             
@@ -142,7 +203,7 @@ def recombine_variable_files(file_paths, output_path, variable, compression_leve
             for i, fpath in enumerate(file_paths):
                 regrid_path = temp_dir / f"regrid_{i}_{Path(fpath).name}"
                 
-                if regrid_with_cdo(fpath, regrid_path):
+                if regrid_with_cdo(fpath, regrid_path, target_grid):
                     regridded_paths.append(regrid_path)
                 else:
                     print(f"    ⚠️  Failed to regrid {fpath}, skipping...")
@@ -153,6 +214,8 @@ def recombine_variable_files(file_paths, output_path, variable, compression_leve
             
             processing_paths = regridded_paths
             print(f"    ✅ Regridded {len(regridded_paths)}/{len(file_paths)} files")
+        else:
+            print(f"    ✓ Files already on {target_grid} grid")
         
         # Open and combine datasets with time decoding enabled
         datasets = [xr.open_dataset(fpath, decode_times=True) for fpath in processing_paths]
@@ -185,3 +248,66 @@ def recombine_variable_files(file_paths, output_path, variable, compression_leve
         traceback.print_exc()
         FILE_CACHE.clear()
         return False, False
+
+def get_dir(
+    args: Any, 
+    source: bool = True, 
+    until_key: Optional[str] = None
+) -> Path:
+    """
+    Constructs the directory path based on FOLDER_STRUCTURE, allowing 
+    for partial path construction up to a specified structure key.
+    
+    Args:
+        args (Any): The object containing the path component attributes.
+        source (bool): If True, uses input_data_type/input_io_data_type. 
+                       Otherwise, uses output_data_type/output_io_data_type.
+        until_key (Optional[str]): If provided, path construction stops 
+                                   after appending the value for this key. 
+                                   Defaults to None (full path).
+    
+    Returns:
+        Path: The constructed directory path.
+    """
+    
+    # 1. Determine data_type and io_data_type
+    if source:
+        data_type = args.input_data_type
+        io_data_type = args.input_io_data_type
+    else:
+        data_type = args.output_data_type
+        io_data_type = args.output_io_data_type
+
+    # 2. Retrieve the base path and structure keys from FOLDER_STRUCTURE
+    structure_dict = rfc.FOLDER_STRUCTURE[data_type][io_data_type]
+    base_path: Path = structure_dict['base']
+    structure_keys: list[str] = structure_dict['structure']
+
+    # 3. Sequentially join the components from the args object
+    current_path = base_path / args.data_source
+    for key in structure_keys:
+        component = getattr(args, key)
+        current_path = current_path / str(component)
+        # Check for the stopping condition
+        if until_key is not None and key == until_key:
+            break
+
+    return current_path
+
+
+def get_track_path(args: Any, source=True, extension=".nc") -> Path:
+    """Constructs the full file path for a track file."""    
+    # Draws are 1-based, array indices are 0-based (e.g., draw 1 is _e0)
+    draw = args.draw
+    draw_text = f'_e{draw - 1}' if draw > 0 else ''
+    
+    # Use f-strings for time strings, ensuring 4-digit years
+    time_period = tuple(map(int, args.time_period.split('-')))
+    time_start_str = f'{time_period[0]:04d}01' # Added :04d for explicit 4-digit formatting
+    time_end_str = f'{time_period[1]:04d}12'
+    
+    # File name construction
+    track_file = f'tracks_{args.basin}_{args.model}_{args.scenario}_{args.variant}_{time_start_str}_{time_end_str}{draw_text}{extension}'
+    
+    # The basin directory is a subdirectory of the time_period directory
+    return get_dir(args, source=source) / track_file

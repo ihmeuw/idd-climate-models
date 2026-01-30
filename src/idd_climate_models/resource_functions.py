@@ -18,44 +18,42 @@ def get_resource_info(
     file_path: Path,
     representative: str = 'first',
     num_files: int = 1,
-    REQUIRED_MEM_FACTOR: float = 3.0,
-    GRIDDING_MULTIPLIER: float = 2.0,
-    MIN_MEM_GB: float = 8.0,
-    MAX_MEM_GB: float = 80.0
-) -> tuple[Dict[str, Any], bool]:
+    REQUIRED_MEM_FACTOR: float = 12.0,  # Increased from 8.0 to account for .compute() loading all data
+    MIN_MEM_GB: float = 8.0,  # Increased minimum for monthly data (hus/ta failed at 4GB, succeeded at 6GB)
+    MAX_MEM_GB: float = 120.0
+) -> tuple[Dict, bool]:
     """
     Allocates resources based on estimated total file size (rep_size * bin_size).
     """
     
-    file_size_gb, full_file_path = get_rep_file_size_gb(file_path=file_path, representative=representative)
+    file_size_gb, _ = get_rep_file_size_gb(file_path=file_path, representative=representative)
     size_gb = file_size_gb * num_files  # Total estimated size for the time bin
     # 1. Memory Calculation
     required_mem_gb = int(size_gb * REQUIRED_MEM_FACTOR) + 4
-    needs_regridding = is_curvilinear_grid(full_file_path)
-    if needs_regridding:
-        required_mem_gb = int(required_mem_gb * GRIDDING_MULTIPLIER)
 
     final_mem_value = min(MAX_MEM_GB, max(MIN_MEM_GB, required_mem_gb))
     memory = f"{int(final_mem_value)}G"
 
+    
     # 2. Runtime/Core Calculation (Adjusted from previous tiers for safety)
-    if final_mem_value < 100.0:
+    if final_mem_value < 10.0:
         runtime = "15m"  
         cores = 2
-    elif final_mem_value < 400.0:
+    elif final_mem_value < 50.0:
         runtime = "30m"  
         cores = 4
     else: 
         runtime = "1h"
         cores = 4
 
+    cores = 4
     resource_request = {
             "memory": memory,
             "cores": cores,
             "runtime": runtime
         }
 
-    return resource_request, needs_regridding
+    return resource_request
 
 def get_rep_file_size_gb(file_path: Path, representative: str = 'first') -> tuple[float, Path]:
     """

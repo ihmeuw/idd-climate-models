@@ -213,20 +213,27 @@ def main():
     parser.add_argument("--frequency", type=str, required=True, help="Time period of the data")
     parser.add_argument("--file_path", type=str, required=True, help="Path to the input file")
     parser.add_argument("--fill_required", type=lambda x: (str(x).lower() == 'true'), default=False, help="Flag to fill missing years at the edges")
-    
+    parser.add_argument("--output_dir", type=str, default=None, help="Custom output directory (overrides default)")
+
     # Parse arguments
     args = parser.parse_args()
-    
+
     # Validate input file exists
     if not os.path.exists(args.file_path):
         print(f"Error: Input file does not exist: {args.file_path}")
         return 1
-    
-    # Create destination directory - Fixed parameter order
-    dest_dir = define_dest_dir(
-        PROCESSED_DATA_PATH, args.data_source, args.model, args.variant, args.scenario, 
-        args.variable, args.grid, args.frequency
-    )
+
+    # Create destination directory
+    if args.output_dir:
+        # Use custom output directory if provided
+        dest_dir = args.output_dir
+        os.makedirs(dest_dir, exist_ok=True)
+    else:
+        # Use default PROCESSED_DATA_PATH location
+        dest_dir = define_dest_dir(
+            PROCESSED_DATA_PATH, args.data_source, args.model, args.variant, args.scenario,
+            args.variable, args.grid, args.frequency
+        )
     
     print(f"Processing climate model data:")
     print(f"    Data source: {args.data_source}")

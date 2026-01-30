@@ -1,0 +1,18 @@
+# Identify model/variants to process
+- Make sure the data exists
+- Make sure the time-period splits exist
+# For each model/variant/scenario
+- Make the model/variant/scenario directories
+
+## For each covariate
+- Make the model/variant/scenario/temporary_directories by variable
+- Process the raw data into the temporary_directories
+  - Reproject
+  - Resample
+  - Clip to region
+  - Convert units
+
+### For each time-period
+- Merge together the variable-specific years that go into that time-period
+- Move the merged time-period data into the model/variant/scenario/time-period directory
+- Clean up temporary_directories

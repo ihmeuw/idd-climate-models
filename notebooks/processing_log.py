@@ -143,7 +143,7 @@ from idd_climate_models.processing_log import (
 # DATA REORGANIZATION FUNCTIONS  
 # ============================================================================
 
-# ...existing functions (get_time_bins, find_yearly_files_in_range, recombine_variable_files)...
+# ...existing functions (get_time_periods, find_yearly_files_in_range, recombine_variable_files)...
 
 def create_recombined_structure(validation_results, target_base_path, 
                                bin_size_years=5, data_source="cmip6", dry_run=False, verbose=True, rerun=False):
@@ -174,7 +174,7 @@ def create_recombined_structure(validation_results, target_base_path,
     # ...existing code...
     
     # Inside the processing loop, after successfully processing each bin:
-    for bin_start, bin_end in time_bins:
+    for bin_start, bin_end in time_periods:
         bin_name = f"{bin_start}-{bin_end}"
         
         # ...existing processing code...

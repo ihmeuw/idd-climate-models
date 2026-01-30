@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 import importlib.util
 import importlib
+import pandas as pd
 
 import idd_climate_models.constants as rfc
 
@@ -13,13 +14,82 @@ package_name = rfc.package_name
 
 REFERENCE_CONFIG_PATH = rfc.REPO_ROOT / repo_name / "src" / package_name / "01_run_tc_risk" / "reference_namelist.py"
 
+# Cache for time bins dataframe to avoid re-reading on every call
+_TIME_BINS_WIDE_DF_CACHE = None
+
+
+def _load_time_bins_wide_df():
+    """Load and cache the time bins wide dataframe."""
+    global _TIME_BINS_WIDE_DF_CACHE
+    if _TIME_BINS_WIDE_DF_CACHE is None:
+        _TIME_BINS_WIDE_DF_CACHE = pd.read_csv(rfc.TIME_BINS_WIDE_DF_PATH)
+    return _TIME_BINS_WIDE_DF_CACHE
+
+
+def get_tracks_per_year(model, variant, scenario, time_period, basin):
+    """
+    Look up tracks_per_year (int_storms) from the time_bins_wide CSV.
+
+    Args:
+        model: Climate model name (e.g., 'CMCC-ESM2')
+        variant: Model variant (e.g., 'r1i1p1f1')
+        scenario: Scenario name (e.g., 'historical', 'ssp126')
+        time_period: Time period string (e.g., '1970-1986')
+        basin: Basin code (e.g., 'EP', 'NA', 'GL')
+
+    Returns:
+        int: The integer storm count for this combination
+
+    Raises:
+        ValueError: If no matching row is found in the time bins file
+    """
+    df = _load_time_bins_wide_df()
+
+    # Parse time_period to get start_year and end_year
+    start_year, end_year = map(int, time_period.split('-'))
+
+    # Filter to matching row
+    mask = (
+        (df['model'] == model) &
+        (df['variant'] == variant) &
+        (df['scenario'] == scenario) &
+        (df['start_year'] == start_year) &
+        (df['end_year'] == end_year)
+    )
+
+    matching_rows = df[mask]
+
+    if len(matching_rows) == 0:
+        raise ValueError(
+            f"No time bins found for {model}/{variant}/{scenario}/{time_period}. "
+            f"Check that this combination exists in {rfc.TIME_BINS_WIDE_DF_PATH}"
+        )
+
+    if len(matching_rows) > 1:
+        print(f"Warning: Multiple rows found for {model}/{variant}/{scenario}/{time_period}, using first")
+
+    row = matching_rows.iloc[0]
+
+    # Get the int_storms column for this basin
+    basin_col = f"{basin}_int"
+
+    if basin_col not in row:
+        raise ValueError(
+            f"Basin '{basin}' not found in time bins file. "
+            f"Expected column '{basin_col}'"
+        )
+
+    tracks_per_year = int(row[basin_col])
+
+    return tracks_per_year
+
 def create_custom_namelist_path(args):
     """
     Constructs the custom namelist path based on input arguments, 
     using the full nested output directory structure.
     """
     target_output_path_root = rfc.TC_RISK_OUTPUT_PATH / args.data_source
-    output_dir = target_output_path_root / args.model / args.variant / args.scenario / args.time_bin
+    output_dir = target_output_path_root / args.model / args.variant / args.scenario / args.time_period
     exp_name_folder = f'{args.basin}' 
     custom_namelist_path = output_dir / exp_name_folder / 'namelist.py'
     
@@ -87,16 +157,24 @@ def create_custom_namelist(args, verbose=False):
     target_output_path = rfc.TC_RISK_OUTPUT_PATH / args.data_source
 
     # Full path to the specific input data folder for base_directory
-    base_dir = target_base_path / args.model / args.variant / args.scenario / args.time_bin
+    base_dir = target_base_path / args.model / args.variant / args.scenario / args.time_period
     
     # Full path to the parent output folder for the specific time bin
     # This value becomes namelist.output_directory
-    output_dir_parent = target_output_path / args.model / args.variant / args.scenario / args.time_bin
+    output_dir_parent = target_output_path / args.model / args.variant / args.scenario / args.time_period
 
     exp_name = f'{args.basin}' # This value becomes namelist.exp_name (e.g., 'GL')
-    tracks_per_year = rfc.tc_risk_tracks_per_basin[args.basin]
 
-    start_year, end_year = map(int, args.time_bin.split('-'))
+    # Look up tracks_per_year from time_bins_wide.csv for this specific combination
+    tracks_per_year = get_tracks_per_year(
+        model=args.model,
+        variant=args.variant,
+        scenario=args.scenario,
+        time_period=args.time_period,
+        basin=args.basin
+    )
+
+    start_year, end_year = map(int, args.time_period.split('-'))
     dataset_type = 'GCM' if args.data_source.lower() == 'cmip6' else 'era5'
 
     replacements = {}
@@ -144,12 +222,39 @@ def execute_tc_risk(args, script_name='compute'):
         if script_name == 'compute':
             # generate_land_masks.generate_land_masks() Seems to be needed once for the repo, not every run
             compute.compute_downscaling_inputs()
-        elif script_name == 'run_downscaling':         
-            for draw in range(0, args.num_draws):
-                # Run tc_risk
-                compute.run_downscaling(args.basin)
-                # Post-process to 
+        elif script_name == 'run_downscaling':
+            import gc
+            from dask.distributed import LocalCluster, Client
             
+            # Create ONE cluster for all draws
+            cl_args = {
+                'n_workers': rfc.tc_risk_n_procs,
+                'processes': True,
+                'threads_per_worker': 1
+            }
+            
+            with LocalCluster(**cl_args) as cluster, Client(cluster) as client:
+                # Initialize cache on ALL worker processes (not in main process!)
+                def init_worker_cache():
+                    """Initialize geo cache on each worker when it starts"""
+                    from intensity import geo
+                    geo._initialize_cache()
+                
+                # Run this function on every worker process
+                client.run(init_worker_cache)
+                print("✅ Initialized cache on all workers")
+                
+                for draw in range(0, args.num_draws):
+                    print(f"Starting draw {draw + 1}/{args.num_draws}")
+                    
+                    # Run tc_risk (pass the client so it reuses the cluster)
+                    compute.run_downscaling(args.basin, client=client)
+                    
+                    # Force garbage collection between draws
+                    gc.collect()
+                    
+                    print(f"✅ Completed draw {draw + 1}/{args.num_draws}")
+        
         print("✅ Run complete.")
     finally:
         os.chdir(original_cwd)

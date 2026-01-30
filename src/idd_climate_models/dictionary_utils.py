@@ -81,7 +81,7 @@ def parse_results(validation_dict, detail='variant'):
     If detail='all', collect every file with its path and fill_required flag,
     plus all parent keys. Otherwise, collect up to the specified detail level.
     """
-    folder_levels = rfc.FOLDER_STRUCTURE[validation_dict['data_type']]
+    folder_levels = rfc.FOLDER_STRUCTURE[validation_dict['data_type']][validation_dict['io_data_type']]['structure']
     flat_path_list = []
 
     def recursive_collect(data, levels, context):
@@ -118,11 +118,11 @@ def parse_results(validation_dict, detail='variant'):
             recursive_collect(data, levels_to_use, context)
     return flat_path_list
 
-def nest_parsed_results(flat_path_list, data_type):
+def nest_parsed_results(flat_path_list, data_type, io_data_type):
 
     if not flat_path_list:
         return {}
-    full_levels = ['model'] + rfc.FOLDER_STRUCTURE.get(data_type, [])
+    full_levels = ['model'] + rfc.FOLDER_STRUCTURE.get(data_type, {}).get(io_data_type, {}).get('structure', [])
     first_item_keys = set(flat_path_list[0].keys())
     nesting_levels = [level for level in full_levels if level in first_item_keys]
     if len(nesting_levels) < 2:
@@ -209,6 +209,70 @@ def summarize_all_failures(validation_dict):
     print("=" * 80)
     return failure_summaries
 
+def collect_all_complete_values(d):
+    """
+    Recursively collect all 'complete' values from nested dictionaries.
+    """
+    complete_values = []
+    if not isinstance(d, dict):
+        return complete_values
+    
+    if 'complete' in d:
+        complete_values.append(d['complete'])
+    
+    for value in d.values():
+        if isinstance(value, dict):
+            complete_values.extend(collect_all_complete_values(value))
+    
+    return complete_values
+
+def check_completion_status(d):
+    """
+    Check the completion status of all nested dictionaries.
+    Returns "all complete", "none complete", or "some complete"
+    """
+    complete_values = collect_all_complete_values(d)
+    
+    if not complete_values:
+        return "no complete keys found"
+    
+    all_true = all(complete_values)
+    all_false = all(not v for v in complete_values)
+    
+    if all_true:
+        return "all complete"
+    elif all_false:
+        return "none complete"
+    else:
+        return "some complete"
+
+def filter_to_incomplete_only(d, path=""):
+    """
+    Recursively filter dictionary to only keep branches where everything is incomplete.
+    Returns the filtered dict, or None if this branch doesn't qualify.
+    """
+    if not isinstance(d, dict):
+        return None
+    
+    # Check completion status of current level
+    status = check_completion_status(d)
+    
+    if status == "none complete":
+        # Everything here is incomplete - return the whole branch
+        return d
+    elif status == "some complete":
+        # Mixed - filter children and only keep those that are all incomplete
+        filtered = {}
+        for key, value in d.items():
+            if isinstance(value, dict):
+                filtered_value = filter_to_incomplete_only(value, f"{path}.{key}" if path else key)
+                if filtered_value is not None:
+                    filtered[key] = filtered_value
+        return filtered if filtered else None
+    else:
+        # "all complete" - don't include this branch
+        return None
+
 def get_models(validation_dict, complete_only=False):
     """
     Extracts a set of model names from the validation_dict.
@@ -229,4 +293,24 @@ def get_models(validation_dict, complete_only=False):
             models.add(model_name)
     return models
 
-
+def get_model_variants(validation_dict, complete_only=False):
+    """
+    Extracts a set of model/variant names from the validation_dict.
+    
+    Args:
+        validation_dict (dict): The dictionary containing 'validation_results'.
+        complete_only (bool): If True, only include models marked as complete.
+        
+    Returns:
+        set: A set of model/variant names.
+    """
+    model_variants = set()
+    for model_name, model_data in validation_dict['validation_results'].items():
+        for variant_name, variant_data in model_data.get('variant', {}).items():
+            full_name = f"{model_name}/{variant_name}"
+            if complete_only:
+                if variant_data.get('complete', False):
+                    model_variants.add(full_name)
+            else:
+                model_variants.add(full_name)
+    return model_variants

@@ -4,6 +4,7 @@ import hashlib
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
+import pandas as pd
 import xarray as xr
 import copy
 
@@ -14,6 +15,9 @@ from idd_climate_models.dictionary_utils import snip_validation_results
 FOLDER_STRUCTURE = rfc.FOLDER_STRUCTURE
 # VALIDATION_RULES = rfc.VALIDATION_RULES
 MODEL_ROOT = rfc.MODEL_ROOT
+
+START_YEAR = rfc.START_YEAR
+END_YEAR = rfc.END_YEAR
 
 build_tc_risk_rules = rfc.build_tc_risk_rules
 DATA_RULES = rfc.DATA_RULES
@@ -31,8 +35,8 @@ def create_validation_dict(DATA_TYPE, IO_DATA_TYPE, DATA_SOURCE, validation_resu
         'data_type': DATA_TYPE,
         'io_data_type': IO_DATA_TYPE,
         'data_source': DATA_SOURCE,
-        'folder_structure': FOLDER_STRUCTURE[DATA_TYPE][IO_DATA_TYPE],
-        'detail_level': FOLDER_STRUCTURE[DATA_TYPE][IO_DATA_TYPE][depth],
+        'folder_structure': FOLDER_STRUCTURE[DATA_TYPE][IO_DATA_TYPE]['structure'],
+        'detail_level': FOLDER_STRUCTURE[DATA_TYPE][IO_DATA_TYPE]['structure'][depth],
         'strict_grid_check': strict_grid_check # <-- FLAG ADDED
     }
     if validation_results is not None:
@@ -205,7 +209,48 @@ def extract_date_ranges(nc_files, model_name, scenario, variant, grid, var, time
     # Return only the date/filename pairs and issues list (monthly is no longer returned)
     return sorted(date_filename_pairs, key=lambda x: x[0]), issues
 
-def filter_files_by_time_bin(source_dir, variable, bin_start, bin_end, frequency, model, scenario, variant, grid): 
+def extract_year_ranges_from_files(files_list, freq_name, model_name, scenario, variant, grid, var_name):
+    """
+    Extract year ranges from the files list in the validation results.
+    Returns list of (start_year, end_year) tuples.
+    """
+    # Get just the filenames from the paths
+    filenames = [Path(f['path']).name for f in files_list]
+    
+    # Use the existing extract_date_ranges function
+    date_filename_pairs, issues = extract_date_ranges(
+        filenames, model_name, scenario, variant, grid, var_name, freq_name
+    )
+    
+    # Convert date integers to years
+    year_ranges = []
+    for (start_int, end_int), filename in date_filename_pairs:
+        start_year = int(str(start_int)[:4])
+        end_year = int(str(end_int)[:4])
+        year_ranges.append((start_year, end_year))
+    
+    return sorted(year_ranges)
+
+def find_missing_years(year_ranges, expected_start, expected_end):
+    """
+    Given a list of (start_year, end_year) tuples and expected range,
+    return list of missing years.
+    """
+    if not year_ranges:
+        return list(range(expected_start, expected_end + 1))
+    
+    # Create set of all covered years
+    covered_years = set()
+    for start, end in year_ranges:
+        covered_years.update(range(start, end + 1))
+    
+    # Find missing years
+    expected_years = set(range(expected_start, expected_end + 1))
+    missing_years = sorted(expected_years - covered_years)
+    
+    return missing_years
+
+def filter_files_by_time_period(source_dir, variable, bin_start, bin_end, frequency, model, scenario, variant, grid): 
     """
     Find and filter all NetCDF files for a variable that overlap with the year bin.
     """
@@ -243,7 +288,7 @@ def filter_files_by_time_bin(source_dir, variable, bin_start, bin_end, frequency
 
 def extract_folder_ranges(subfolders, scenario):
     """
-    Extract year ranges from time-period folder names (e.g., '1970-1989').
+    Extract year ranges from time_period folder names (e.g., '1970-1989').
     Returns date ranges in YYYY00-YYYY00 format for use with check_coverage.
     """
     issues = []
@@ -371,7 +416,7 @@ def validate_frequency_level(path, context, time_folder, rules):
 
 def validate_time_period_level(path, context, time_folder_name, rules):
     """
-    Validate the 'time-period' level for TC_RISK (folder must contain ALL required variable files).
+    Validate the 'time_period' level for TC_RISK (folder must contain ALL required variable files).
     
     This version ensures all 6 required variables are present and omits the 
     'fill_required' flag, as requested.
@@ -477,7 +522,7 @@ VALIDATION_FUNCTION_MAP = {
 # MODULAR VALIDATION FUNCTIONS (The 4 Steps + Dispatcher)
 # ============================================================================
 
-def check_folder_rules(level, children, rules, data_source):
+def check_folder_rules(level, children, rules, data_source, context=None):
     """
     STEP 1: Check if folder contents meet the rules for this level.
     """
@@ -504,9 +549,25 @@ def check_folder_rules(level, children, rules, data_source):
         issues.append(f"Expected {rules['exact_count']} folder(s), found {len(children)}: {children}")
 
     if rules.get('validator'):
-        for child in children:
-            if not rules['validator'](child):
-                issues.append(f"Invalid folder name: '{child}'")
+        # Only add validation issues if we're NOT using filter_by_validator
+        # (if we're filtering, the validator is used for selection, not error reporting)
+        if not rules.get('filter_by_validator'):
+            import inspect
+            validator = rules['validator']
+            sig = inspect.signature(validator)
+            num_params = len(sig.parameters)
+            
+            for child in children:
+                try:
+                    # Check if validator expects context as second parameter
+                    if num_params >= 2 and context is not None:
+                        if not validator(child, context):
+                            issues.append(f"Invalid folder name: '{child}'")
+                    else:
+                        if not validator(child):
+                            issues.append(f"Invalid folder name: '{child}'")
+                except TypeError as e:
+                    issues.append(f"Validator error for '{child}': {e}")
 
     return issues
 
@@ -514,16 +575,16 @@ def _determine_next_level(level, data_type, io_data_type):
     """
     STEP 2: Dynamically determine the next level in the hierarchy.
     """
-    level_order = FOLDER_STRUCTURE.get(data_type, {}).get(io_data_type, [])
+    level_order = FOLDER_STRUCTURE.get(data_type, {}).get(io_data_type, {}).get('structure', [])
     try:
         current_idx = level_order.index(level)
         return level_order[current_idx + 1] if current_idx < len(level_order) - 1 else None
     except ValueError:
         return None
 
-def _filter_children_by_priority(level, children_names, rules):
+def _filter_children_by_priority(level, children_names, rules, context=None):
     """
-    STEP 3: Apply Grid Priority filtering if applicable. 
+    STEP 3: Apply filtering (Grid Priority or Validator-based) if applicable. 
     """
     children_to_validate = children_names.copy()
     children_results_placeholders = {}
@@ -548,9 +609,43 @@ def _filter_children_by_priority(level, children_names, rules):
                 }
         else:
             pass
+    
+    # NEW: Filter based on validator (for frequency filtering)
+    elif rules.get('validator') and rules.get('filter_by_validator') is True:
+        import inspect
+        validator = rules['validator']
+        sig = inspect.signature(validator)
+        num_params = len(sig.parameters)
+        
+        valid_children = []
+        invalid_children = []
+        
+        for child in children_names:
+            is_valid = False
+            try:
+                if num_params >= 2 and context is not None:
+                    is_valid = validator(child, context)
+                else:
+                    is_valid = validator(child)
+            except:
+                pass
+            
+            if is_valid:
+                valid_children.append(child)
+            else:
+                invalid_children.append(child)
+        
+        children_to_validate = valid_children
+        
+        # Mark invalid children as skipped
+        for invalid_child in invalid_children:
+            children_results_placeholders[invalid_child] = {
+                'complete': True,
+                'issues': [f"Validation skipped: frequency not required for this variable"],
+                'children': {}
+            }
             
     return children_to_validate, children_results_placeholders, priority_issues
-
 
 def validate_level(path, level, context, data_type, io_data_type, data_source):
     """
@@ -572,7 +667,7 @@ def validate_level(path, level, context, data_type, io_data_type, data_source):
         return result
 
     # --- Step 1: Validate Current Folder ---
-    folder_issues = check_folder_rules(level, children_names, rules, data_source) 
+    folder_issues = check_folder_rules(level, children_names, rules, data_source, context) 
     issues.extend(folder_issues)
 
     # --- Step 2: Determine Next Level ---
@@ -582,7 +677,8 @@ def validate_level(path, level, context, data_type, io_data_type, data_source):
     children_to_validate, children, priority_issues = _filter_children_by_priority(
         level, 
         children_names, 
-        rules
+        rules,
+        context
     )
     issues.extend(priority_issues)
     
@@ -718,9 +814,10 @@ def validate_model_in_source(model_name, source_path, data_type, io_data_type, d
         data_source=data_source # Passes data_source as separate argument
     )
 
-def validate_all_models_in_source(validation_dict, verbose=True, strict_grid_check=False): 
+def validate_all_model_variants_in_source(validation_dict, verbose=True, strict_grid_check=False): 
     """
-    Wrapper to run validation across all models and log results.
+    Wrapper to run validation across all models and their variants, tracking each variant separately.
+    Returns detailed information about which model/variant combinations pass validation.
     Retrieves and passes the 'strict_grid_check' flag.
     """
     
@@ -729,8 +826,6 @@ def validate_all_models_in_source(validation_dict, verbose=True, strict_grid_che
     data_source = validation_dict['data_source']
     detail_level = validation_dict['detail_level']
     io_data_type = validation_dict['io_data_type']
-    
-    # We rely on the flag being passed here, but also use the dict version for safety printing.
 
     LOG_FILENAME = "validation_log.json" 
 
@@ -750,26 +845,213 @@ def validate_all_models_in_source(validation_dict, verbose=True, strict_grid_che
         return {}
 
     all_model_results = {}
+    variant_status_summary = {
+        'complete_variants': [],      # List of (model, variant) tuples that are complete
+        'incomplete_variants': [],    # List of (model, variant, issues) tuples that are incomplete
+        'variant_details': {}          # Dict: {model: {variant: {complete: bool, issues: [...]}}}
+    }
     
-    # 3. Validation Execution Loop
+    # Validation Execution Loop
     for i, model_name in enumerate(model_names, 1):
         if verbose:
             print(f"[{i}/{len(model_names)}] Validating {model_name}")
 
-        # CRITICAL CHANGE: Pass the strict_grid_check flag to the next function
+        # Validate the entire model structure
         model_result = validate_model_in_source(
             model_name, 
             source_path, 
             data_type, 
             io_data_type,
             data_source,
-            strict_grid_check # <-- PASSES THE FLAG
+            strict_grid_check
         ) 
         all_model_results[model_name] = model_result
+        
+        # Extract variant-level results
+        if 'variant' in model_result:
+            variant_details = {}
+            
+            for variant_name, variant_data in model_result['variant'].items():
+                is_complete = variant_data.get('complete', False)
+                variant_issues = variant_data.get('issues', [])
+                
+                # Store detailed variant information
+                variant_details[variant_name] = {
+                    'complete': is_complete,
+                    'issues': variant_issues
+                }
+                
+                # Track complete and incomplete variants
+                if is_complete:
+                    variant_status_summary['complete_variants'].append((model_name, variant_name))
+                    if verbose:
+                        print(f"  ✓ {model_name}/{variant_name}: Complete")
+                else:
+                    variant_status_summary['incomplete_variants'].append(
+                        (model_name, variant_name, variant_issues)
+                    )
+                    if verbose:
+                        print(f"  ✗ {model_name}/{variant_name}: Incomplete ({len(variant_issues)} issues)")
+            
+            variant_status_summary['variant_details'][model_name] = variant_details
 
     validation_dict['validation_results'] = all_model_results
+    validation_dict['variant_status'] = variant_status_summary
     
-    # 4. Write new log
+    # Summary statistics
+    total_complete = len(variant_status_summary['complete_variants'])
+    total_incomplete = len(variant_status_summary['incomplete_variants'])
+    
+    if verbose:
+        print("\n" + "=" * 80)
+        print(f"Validation Summary: {total_complete} complete, {total_incomplete} incomplete model/variant combinations")
+        print("=" * 80)
+    
+    # Write log
     log_validation_results(validation_dict, detail_level=detail_level)
 
     return validation_dict
+
+def analyze_incomplete_variables(incomplete_dict, save_csv=False):
+    """
+    Analyze incomplete_only dictionary to identify missing years for each variable.
+    Returns a list of records for creating a DataFrame.
+    """
+
+    incomplete_dict = copy.deepcopy(incomplete_dict)
+    data_type = incomplete_dict.pop('data_type')
+    data_source = incomplete_dict.pop('data_source')
+    io_data_type = incomplete_dict.pop('io_data_type')
+
+    LOG_FILENAME = "missing_variables.csv" 
+
+    source_path = os.path.join(MODEL_ROOT, data_type, io_data_type, data_source)
+    log_path = os.path.join(source_path, LOG_FILENAME)
+
+    records = []
+    
+    for model_name, model_data in incomplete_dict.items():
+        # Skip if model_data is not a dict (shouldn't happen, but safety check)
+        if not isinstance(model_data, dict):
+            continue
+            
+        # Get variant data (under literal 'variant' key)
+        variant_container = model_data.get('variant', {})
+        for variant_name, variant_data in variant_container.items():
+            if not isinstance(variant_data, dict):
+                continue
+            
+            # Get scenario data (under literal 'scenario' key)
+            scenario_container = variant_data.get('scenario', {})
+            for scenario_name, scenario_data in scenario_container.items():
+                if not isinstance(scenario_data, dict):
+                    continue
+                
+                expected_start = START_YEAR.get(scenario_name)
+                expected_end = END_YEAR.get(scenario_name)
+                
+                if expected_start is None or expected_end is None:
+                    continue
+                
+                # Get variable data (under literal 'variable' key)
+                variable_container = scenario_data.get('variable', {})
+                for var_name, var_data in variable_container.items():
+                    if not isinstance(var_data, dict):
+                        continue
+                    
+                    # Get grid data (under literal 'grid' key)
+                    grid_container = var_data.get('grid', {})
+                    for grid_name, grid_data in grid_container.items():
+                        if not isinstance(grid_data, dict):
+                            continue
+                        
+                        # Get frequency data (under literal 'frequency' key)
+                        frequency_container = grid_data.get('frequency', {})
+                        for freq_name, freq_data in frequency_container.items():
+                            if not isinstance(freq_data, dict):
+                                continue
+                            
+                            # Check if this has files
+                            files = freq_data.get('files', [])
+                            if not files:
+                                continue
+                            
+                            # Extract year ranges from files
+                            year_ranges = extract_year_ranges_from_files(
+                                files, freq_name, model_name, scenario_name, 
+                                variant_name, grid_name, var_name
+                            )
+                            
+                            # Find missing years
+                            missing_years = find_missing_years(year_ranges, expected_start, expected_end)
+                            
+                            # Create a record for each missing year
+                            for year in missing_years:
+                                records.append({
+                                    'Model': model_name,
+                                    'Variant': variant_name,
+                                    'Scenario': scenario_name,
+                                    'Variable': var_name,
+                                    'Grid': grid_name,
+                                    'Frequency': freq_name,
+                                    'Missing_Year': year
+                                })
+
+    # Save to CSV if requested
+    if save_csv:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        df = pd.DataFrame(records)
+        df.to_csv(log_path, index=False)
+        os.chmod(log_path, 0o755)  # Set file permissions to be widely readable
+        print(f"Missing variables analysis saved to {log_path}")
+    
+    return records
+
+def analyze_validation_for_missing_data(validation_info, save_csv=True):
+    """
+    Takes validation_info from compare_model_validation() and produces:
+    1. A filtered dictionary containing only incomplete items
+    2. A list of records showing missing years for each incomplete variable
+    3. Optionally saves the results to CSV
+    
+    Args:
+        validation_info (dict): Output from compare_model_validation()
+        save_csv (bool): Whether to save results to CSV file
+    
+    Returns:
+        tuple: (incomplete_dict, records)
+            - incomplete_dict: Filtered validation results with only incomplete items
+            - records: List of dicts with columns: Model, Variant, Scenario, 
+                      Variable, Grid, Frequency, Missing_Year
+    """
+    from idd_climate_models.dictionary_utils import filter_to_incomplete_only
+    
+    # Step 1: Filter to incomplete only
+    results = validation_info['input_validation_dict']['validation_results']
+    incomplete_dict = {}
+    
+    for model_name, model_data in results.items():
+        filtered = filter_to_incomplete_only(model_data)
+        if filtered is not None:
+            incomplete_dict[model_name] = filtered
+    
+    # Check if there are any incomplete items
+    if not incomplete_dict:
+        print("✓ No incomplete data found - all validation checks passed!")
+        return {}, []
+    
+    # Step 2: Add metadata needed for analyze_incomplete_variables
+    incomplete_dict_with_metadata = {
+        'data_type': validation_info['input_validation_dict']['data_type'],
+        'data_source': validation_info['input_validation_dict']['data_source'],
+        'io_data_type': validation_info['input_validation_dict']['io_data_type'],
+        **incomplete_dict
+    }
+    
+    # Step 3: Analyze missing years
+    records = analyze_incomplete_variables(incomplete_dict_with_metadata, save_csv=save_csv)
+    
+    if not records:
+        print("✓ No missing years found in incomplete data!")
+    
+    return incomplete_dict, records

@@ -109,6 +109,7 @@ Identifiers: EP - Eastern Pacific
              NA - North Atlantic
              NI - North Indian
              SI - South Indian
+             AU - Australia
              SP - South Pacific
              WP - Western Pacific
              GL - Global (no basin)

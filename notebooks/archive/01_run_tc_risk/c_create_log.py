@@ -9,8 +9,8 @@ from idd_climate_models.model_validation import (
 def main():
     parser = argparse.ArgumentParser(description='Validate reorganized climate data in tc_risk')
     parser.add_argument('--data_source', default='cmip6')
-    parser.add_argument('--detail_level', default='time-period', 
-                       choices=['model', 'variant', 'scenario', 'time-period', 'file'])
+    parser.add_argument('--detail_level', default='time_period', 
+                       choices=['model', 'variant', 'scenario', 'time_period', 'file'])
     args = parser.parse_args()
     
     print("Validating reorganized data in tc_risk...")

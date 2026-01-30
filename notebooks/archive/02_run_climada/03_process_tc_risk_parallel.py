@@ -100,9 +100,9 @@ folder_template = tool.get_task_template(
         "--model {{model}} "
         "--variant {{variant}} " 
         "--scenario {{scenario}} "
-        "--time_bin {{time_bin}} "
+        "--time_period {{time_period}} "
     ).format(script_root=SCRIPT_ROOT),
-    node_args=["data_source", "model", "variant", "scenario", "time_bin"],
+    node_args=["data_source", "model", "variant", "scenario", "time_period"],
 )
 
 # --- Template 2: Global Run (2b) ---
@@ -119,9 +119,9 @@ global_run_template = tool.get_task_template(
         "--model {{model}} "
         "--variant {{variant}} "
         "--scenario {{scenario}} "
-        "--time_bin {{time_bin}} "
+        "--time_period {{time_period}} "
     ).format(script_root=SCRIPT_ROOT),
-    node_args=["data_source", "model", "variant", "scenario", "time_bin"],
+    node_args=["data_source", "model", "variant", "scenario", "time_period"],
 )
 
 # --- Template 3: Basin Runs (2c) ---
@@ -138,11 +138,11 @@ basin_run_template = tool.get_task_template(
         "--model {{model}} "
         "--variant {{variant}} "
         "--scenario {{scenario}} "
-        "--time_bin {{time_bin}} "
+        "--time_period {{time_period}} "
         "--basin {{basin}} "
         f"--num_draws {NUM_DRAWS} "
     ).format(script_root=SCRIPT_ROOT),
-    node_args=["data_source", "model", "variant", "scenario", "time_bin", "basin"],
+    node_args=["data_source", "model", "variant", "scenario", "time_period", "basin"],
 )
 
 # ============================================================================
@@ -166,7 +166,7 @@ for item in items_to_process:
     model_name = item['model']
     variant_name = item['variant']
     scenario_name = item['scenario']
-    time_bin_str = item['time-period'] 
+    time_period_str = item['time_period'] 
 
     # --- LEVEL 1: FOLDER CREATION (Parent Task) ---
     folder_task = folder_template.create_task(
@@ -174,7 +174,7 @@ for item in items_to_process:
         model=model_name,
         variant=variant_name,
         scenario=scenario_name,
-        time_bin=time_bin_str,
+        time_period=time_period_str,
     )
     all_tasks.append(folder_task)
 
@@ -185,7 +185,7 @@ for item in items_to_process:
         model=model_name,
         variant=variant_name,
         scenario=scenario_name,
-        time_bin=time_bin_str,
+        time_period=time_period_str,
     )
     all_tasks.append(global_task)
     dependencies.append((global_task, folder_task)) 
@@ -198,7 +198,7 @@ for item in items_to_process:
             model=model_name,
             variant=variant_name,
             scenario=scenario_name,
-            time_bin=time_bin_str,
+            time_period=time_period_str,
             basin=basin,
         )
         all_tasks.append(basin_task)

@@ -120,6 +120,8 @@ def add_tc_parameters_to_track(ds, track_year, track_num,
     track_data : dict
         Dictionary with estimated parameters
     """
+
+
     # Select the track using isel (index-based selection) instead of sel
     track = ds.isel(year=track_year, n_trk=track_num)
     
@@ -209,11 +211,7 @@ def add_tc_parameters_to_track(ds, track_year, track_num,
     return track_data
 
 
-def add_parameters_to_dataset(input_file, output_file=None,
-                              use_ensemble=True,
-                              env_pressure_method='standard',
-                              overwrite=False,
-                              verbose=True):
+def add_parameters_to_dataset(ds, args):
     """
     Add TC parameters to all tracks in a NetCDF file.
     
@@ -237,25 +235,9 @@ def add_parameters_to_dataset(input_file, output_file=None,
     output_path : Path
         Path to output file
     """
-    input_path = Path(input_file)
-    
-    if output_file is None:
-        output_path = input_path.parent / f"{input_path.stem}_with_params{input_path.suffix}"
-    else:
-        output_path = Path(output_file)
-    
-    if output_path.exists() and not overwrite:
-        print(f"Output file exists: {output_path}")
-        print("Use overwrite=True to replace it.")
-        return output_path
-    
-    if verbose:
-        print(f"\nProcessing: {input_path.name}")
-        print(f"Output: {output_path.name}")
-        print("="*70)
-    
-    # Load dataset
-    ds = xr.open_dataset(input_path)
+    use_ensemble = args.use_ensemble if hasattr(args, 'use_ensemble') else True
+    env_pressure_method = args.env_pressure_method if hasattr(args, 'env_pressure_method') else 'standard'
+    verbose = args.verbose if hasattr(args, 'verbose') else True
     
     # Get dimensions - NOTE: data shape is (n_tracks, n_time) not (n_years, n_tracks, n_time)!
     n_tracks = len(ds.n_trk)
@@ -320,7 +302,6 @@ def add_parameters_to_dataset(input_file, output_file=None,
             
             # Run estimation
             if use_ensemble:
-                from idd_climate_models.tc_estimation import ensemble_estimates
                 estimates = ensemble_estimates(lat_valid, lon_valid, vmax_kt, 
                                               u850_valid, v850_valid, u250_valid, v250_valid)
                 
@@ -331,7 +312,6 @@ def add_parameters_to_dataset(input_file, output_file=None,
                 roci_est = estimates['roci']['mean']
                 roci_std_est = estimates['roci'].get('std', np.zeros_like(roci_est))
             else:
-                from idd_climate_models.tc_estimation import _estimate_pressure, estimate_rmw, estimate_roci
                 cp = _estimate_pressure(np.full(vmax_kt.shape, np.nan), lat_valid, lon_valid, vmax_kt)
                 cp_std = np.zeros_like(cp)
                 rmw_est = estimate_rmw(np.full(vmax_kt.shape, np.nan), cp)
@@ -442,23 +422,7 @@ def add_parameters_to_dataset(input_file, output_file=None,
     ds_out.attrs['tc_estimation_ensemble'] = str(use_ensemble)
     ds_out.attrs['tc_env_pressure_method'] = env_pressure_method
     
-    # Save to file
-    if verbose:
-        print(f"\nSaving to: {output_path}")
-    
-    ds_out.to_netcdf(output_path)
-    
-    if verbose:
-        print(f"\nSummary:")
-        print(f"  Total tracks processed: {n_processed}")
-        print(f"  Tracks skipped: {n_skipped}")
-        print(f"  Output file size: {output_path.stat().st_size / 1e6:.1f} MB")
-        print("="*70)
-    
-    ds.close()
-    ds_out.close()
-    
-    return output_path
+    return ds_out
 
 
 def batch_process_directory(input_dir, output_dir=None, 

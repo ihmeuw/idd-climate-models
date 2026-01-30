@@ -34,31 +34,31 @@ TIMESTEPS_PER_DAY = rfc.tc_time_steps_per_day
 
 # Pre-calculate all time bins (This is efficient and kept)
 TIME_BINS: Dict[str, List[Tuple[int, int]]] = {
-    scenario: rfc.get_time_bins(scenario, BIN_SIZE_YEARS)
+    scenario: rfc.get_time_periods(scenario, BIN_SIZE_YEARS)
     for scenario in ssp_scenario_map
 }
 
-def get_output_dir(model: str, scenario: str, time_bin: Tuple[int, int]) -> Path:
+def get_output_dir(model: str, scenario: str, time_period: Tuple[int, int]) -> Path:
     """Constructs the parent directory for a time bin."""
     # Simplified Path construction
-    time_bin_str = f'{time_bin[0]}-{time_bin[1]}'
-    return TC_RISK_OUTPUT_PATH / DATA_SOURCE / model / VARIANT / scenario / time_bin_str
+    time_period_str = f'{time_period[0]}-{time_period[1]}'
+    return TC_RISK_OUTPUT_PATH / DATA_SOURCE / model / VARIANT / scenario / time_period_str
 
-def get_track_path(model: str, scenario: str, time_bin: Tuple[int, int], basin: str, draw: int) -> Path:
+def get_track_path(model: str, scenario: str, time_period: Tuple[int, int], basin: str, draw: int) -> Path:
     """Constructs the full file path for a track file."""
-    output_dir_parent = get_output_dir(model, scenario, time_bin)
+    output_dir_parent = get_output_dir(model, scenario, time_period)
     
     # Draws are 1-based, array indices are 0-based (e.g., draw 1 is _e0)
     draw_text = f'_e{draw - 1}' if draw > 0 else ''
     
     # Use f-strings for time strings, ensuring 4-digit years
-    time_start_str = f'{time_bin[0]:04d}01' # Added :04d for explicit 4-digit formatting
-    time_end_str = f'{time_bin[1]:04d}12'
+    time_start_str = f'{time_period[0]:04d}01' # Added :04d for explicit 4-digit formatting
+    time_end_str = f'{time_period[1]:04d}12'
     
     # File name construction
     track_file = f'tracks_{basin}_{model}_{scenario}_{VARIANT}_{time_start_str}_{time_end_str}{draw_text}.nc'
     
-    # The basin directory is a subdirectory of the time-period directory
+    # The basin directory is a subdirectory of the time_period directory
     return output_dir_parent / basin / track_file
 
 
@@ -138,12 +138,12 @@ def process_model_scenario(model: str, scenario: str,
     all_results_list: List[Dict[str, Union[str, int, float]]] = []
     for scenario in ssp_scenario_map:
         print(f"  Scenario: {scenario}")
-        scenario_time_bins = TIME_BINS.get(scenario, [])
-        for time_bin_tuple in scenario_time_bins:
-            print(f"    Time bin: {time_bin_tuple[0]}-{time_bin_tuple[1]}")            
+        scenario_time_periods = TIME_BINS.get(scenario, [])
+        for time_period_tuple in scenario_time_periods:
+            print(f"    Time bin: {time_period_tuple[0]}-{time_period_tuple[1]}")            
             for basin in BASINS:
                 for draw in range(0, NUM_DRAWS):
-                    file_path = get_track_path(model, scenario, time_bin_tuple, basin, draw)
+                    file_path = get_track_path(model, scenario, time_period_tuple, basin, draw)
                     if not file_path.exists():
                         continue # Skip non-existent files
                     # Call the encapsulated processing function
