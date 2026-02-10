@@ -3,6 +3,46 @@ import numpy as np
 import zarr
 from pathlib import Path
 
+def verify_zarr_storm_count(original_nc_path, zarr_path):
+    """
+    Lightweight verification: check that zarr has same number of storms as NC file.
+    Returns True if counts match, False otherwise.
+    """
+    try:
+        # Load original NetCDF
+        ds_original = xr.open_dataset(original_nc_path)
+        n_trk_original = ds_original.sizes["n_trk"]
+        
+        # Count valid tracks (same logic as processing)
+        valid_count = 0
+        for i in range(n_trk_original):
+            if not (np.isnan(ds_original["tc_years"][i].item()) or 
+                    np.isnan(ds_original["tc_month"][i].item())):
+                
+                lon = ds_original["lon_trks"][i].values
+                lat = ds_original["lat_trks"][i].values
+                valid_idx = np.isfinite(lon) & np.isfinite(lat)
+                
+                if valid_idx.sum() > 0:
+                    valid_count += 1
+        
+        ds_original.close()
+        
+        # Open Zarr store and count groups
+        zarr_store = zarr.open(zarr_path, mode='r')
+        zarr_count = len(list(zarr_store.group_keys()))
+        
+        if valid_count == zarr_count:
+            print(f"    ✓ Storm count verified: {valid_count} storms")
+            return True
+        else:
+            print(f"    ⚠️  Storm count mismatch: NC has {valid_count}, Zarr has {zarr_count}")
+            return False
+            
+    except Exception as e:
+        print(f"    ⚠️  Verification error: {e}")
+        return False
+
 def verify_zarr_integrity(original_nc_path, zarr_path, args):
     """
     Comprehensive verification that Zarr output matches original NetCDF input.
@@ -43,7 +83,9 @@ def verify_zarr_integrity(original_nc_path, zarr_path, args):
     print(f"   Tracks in Zarr: {len(group_names)}")
     
     if valid_count != len(group_names):
-        print(f"   ⚠️  WARNING: Track count mismatch!")
+        error_msg = f"Storm count mismatch: NC has {valid_count} valid tracks, zarr has {len(group_names)} storms"
+        print(f"   ❌ ERROR: {error_msg}")
+        raise ValueError(error_msg)
     else:
         print(f"   ✓ Track counts match")
     

@@ -17,7 +17,7 @@ TC_RISK_OUTPUT_PATH = TC_RISK_PATH / 'output'
 CLIMADA_PATH = Path(MODEL_ROOT) / "climada"
 CLIMADA_INPUT_PATH = CLIMADA_PATH / "input"
 CLIMADA_OUTPUT_PATH = CLIMADA_PATH / "output"
-TIME_BINS_DF_PATH = Path(MODEL_ROOT) / 'tempestextremes/outputs/cmip6/time_bins.csv'
+TIME_BINS_DF_PATH = Path(MODEL_ROOT) / 'tempestextremes/outputs/cmip6/bayespoisson_time_bins.csv'
 TIME_BINS_WIDE_DF_PATH = Path(MODEL_ROOT) / 'tempestextremes/outputs/cmip6/bayespoisson_time_bins_wide.csv'
 
 repo_name = "idd-climate-models"

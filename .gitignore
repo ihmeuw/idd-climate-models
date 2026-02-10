@@ -143,3 +143,10 @@ docs/sphinx/.doctrees/
 *.hdf5
 *.parquet
 *.feather
+
+# Core dumps
+core
+core.*
+
+# NFS temp files
+.nfs*

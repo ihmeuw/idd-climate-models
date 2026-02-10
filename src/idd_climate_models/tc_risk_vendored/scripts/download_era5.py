@@ -1,0 +1,168 @@
+# Script for downloading ERA5 re-analysis data necessary to run the
+# tropical cyclone downscaling risk model.
+# Requires cdsapi to be installed.
+
+import cdsapi
+import os
+
+from multiprocessing import Pool
+
+# In order to read namelist.py
+import sys
+cwd = os.path.dirname(os.path.realpath(__file__))
+parent = os.path.dirname(cwd)
+sys.path.append(parent)
+
+# LAZY IMPORT: import namelist_loader as namelist in each function that needs it
+
+file_type = namelist.file_type
+year_start = int(namelist.start_year)
+year_end = int(namelist.end_year)
+fn_base = namelist.base_directory
+os.makedirs(fn_base, exist_ok = True)
+
+def request_file(fn, req_type, req):
+    c = cdsapi.Client()
+    if not os.path.isfile(fn):
+        print('Requesting %s...' % fn)
+        c.retrieve(req_type, req, fn)
+        print('Downloaded %s...' % fn)
+    else:
+        print('Found file %s...' % fn)
+
+def f_request(year):
+    fn_dir = '%s/%d' % (fn_base, year)
+    if not os.path.exists(fn_dir):
+        os.makedirs(fn_dir)
+
+    sst_fn = '%s/era5_sst_monthly_%d.%s' % (fn_dir, year, file_type)
+    sp_fn = '%s/era5_sp_monthly_%d.%s' % (fn_dir, year, file_type)
+    q_fn = '%s/era5_q_monthly_%d.%s' % (fn_dir, year, file_type)
+    t_fn = '%s/era5_t_monthly_%d.%s' % (fn_dir, year, file_type)
+    u_fn = '%s/era5_u_daily_%d.%s' % (fn_dir, year, file_type)
+    v_fn = '%s/era5_v_daily_%d.%s' % (fn_dir, year, file_type)
+
+    req_sst = {
+        'data_format': file_type,
+        'product_type': ['monthly_averaged_reanalysis'],
+        'variable': ['sea_surface_temperature'],
+        'year': [str(year)],
+        'month': ['01', '02', '03',
+                  '04', '05', '06',
+                  '07', '08', '09',
+                  '10', '11', '12',
+              ],
+        'grid': '2.0/2.0',
+        'time': '00:00'
+    }
+
+    req_sp = {
+        'data_format': file_type,
+        'product_type': 'monthly_averaged_reanalysis',
+        'variable': 'surface_pressure',
+        'year': str(year),
+        'month': ['01', '02', '03',
+                  '04', '05', '06',
+                  '07', '08', '09',
+                  '10', '11', '12',
+              ],
+        'grid': '2.0/2.0',
+        'time': '00:00'
+    }
+
+    req_q = {
+        'data_format': file_type,
+        'product_type': 'monthly_averaged_reanalysis',
+        'variable': 'specific_humidity',
+        'pressure_level': [ '70', '100', '125', '150', '175', '200',
+                            '225', '250', '300', '350', '400', '450',
+                            '500', '550', '600', '650', '700', '750',
+                            '775', '800', '825', '850', '875', '900',
+                            '925', '950', '975','1000',
+                        ],
+        'year': str(year),
+        'month': ['01', '02', '03',
+                  '04', '05', '06',
+                  '07', '08', '09',
+                  '10', '11', '12',
+              ],
+        'grid': '2.0/2.0',
+        'time': '00:00',
+    }
+
+    req_t = {
+        'data_format': file_type,
+        'product_type': 'monthly_averaged_reanalysis',
+        'variable': 'temperature',
+        'pressure_level': [ '70', '100', '125', '150', '175', '200',
+                            '225', '250', '300', '350', '400', '450',
+                            '500', '550', '600', '650', '700', '750',
+                            '775', '800', '825', '850', '875', '900',
+                            '925', '950', '975','1000',
+                        ],
+        'year': str(year),
+        'month': ['01', '02', '03',
+                  '04', '05', '06',
+                  '07', '08', '09',
+                  '10', '11', '12',
+              ],
+        'grid': '2.0/2.0',
+        'time': '00:00',
+    }
+
+    req_u = {
+        'product_type': 'reanalysis',
+        'data_format': file_type,
+        'variable': 'u_component_of_wind',
+        'pressure_level': ['250', '850'],
+        'year': str(year),
+        'month': ['01', '02', '03',
+                  '04', '05', '06',
+                  '07', '08', '09',
+                  '10', '11', '12',
+              ],
+        'day': ['01', '02', '03', '04', '05', '06',
+                '07', '08', '09', '10', '11', '12',
+                '13', '14', '15', '16', '17', '18',
+                '19', '20', '21', '22', '23', '24',
+                '25', '26', '27', '28', '29', '30',
+                '31',
+            ],
+        'grid': '2.0/2.0',
+        'time': ['00:00', '12:00'],
+    }
+
+    req_v = {
+        'product_type': 'reanalysis',
+        'data_format': file_type,
+        'variable': 'v_component_of_wind',
+        'pressure_level': ['250', '850'],
+        'year': str(year),
+        'month': ['01', '02', '03',
+                  '04', '05', '06',
+                  '07', '08', '09',
+                  '10', '11', '12',
+              ],
+        'day': ['01', '02', '03', '04', '05', '06',
+                '07', '08', '09', '10', '11', '12',
+                '13', '14', '15', '16', '17', '18',
+                '19', '20', '21', '22', '23', '24',
+                '25', '26', '27', '28', '29', '30',
+                '31',
+            ],
+        'grid': '2.0/2.0',
+        'time': ['00:00', '12:00'],
+    }
+
+    request_file(sst_fn, 'reanalysis-era5-single-levels-monthly-means', req_sst)
+    request_file(sp_fn, 'reanalysis-era5-single-levels-monthly-means', req_sp)
+    request_file(t_fn, 'reanalysis-era5-pressure-levels-monthly-means', req_t)
+    request_file(q_fn, 'reanalysis-era5-pressure-levels-monthly-means', req_q)
+    request_file(u_fn, 'reanalysis-era5-pressure-levels', req_u)
+    request_file(v_fn, 'reanalysis-era5-pressure-levels', req_v)
+
+years = list(range(year_start, year_end+1))
+p = Pool(2)
+output = p.map(f_request, years)
+p.close()
+p.join()
