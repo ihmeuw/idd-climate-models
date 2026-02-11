@@ -311,6 +311,15 @@ def execute_tc_risk_with_config(config_dict, script_name='compute', args=None, d
                             verify_zarr_integrity(str(fn_trk_out), str(zarr_path), None)
                             validation_time = time.time() - validation_start
                             print(f"            ✅ Validation: {validation_time:.1f}s")
+                            
+                            # Step 3: Create completion marker (atomic operation, crash-safe)
+                            from idd_climate_models.zarr_functions import create_draw_completion_marker
+                            climada_input = Path(args.data_source) if hasattr(args, 'data_source') else None
+                            if climada_input:
+                                climada_input = (rfc.CLIMADA_INPUT_PATH / args.data_source / args.model / 
+                                               args.variant / args.scenario / args.time_period / args.basin)
+                                create_draw_completion_marker(climada_input, draw_num)
+                                print(f"            ✅ Completion marker created")
                         except Exception as e:
                             validation_time = time.time() - validation_start
                             print(f"            ❌ Validation failed after {validation_time:.1f}s")
@@ -647,19 +656,59 @@ def create_storm_list_file(ds_multi, args):
     
     print(f"Saving {len(storms)} storms to Zarr at: {output_zarr_path}")
 
-    first_ds = storms[0]
-    first_ds.to_zarr(
-        output_zarr_path,
-        group=f'storm_{first_ds.storm_id.item():04d}', 
-        mode='w',
-        consolidated=True
-    )
-
-    for ds in storms[1:]:
-        group_name = f'storm_{ds.storm_id.item():04d}'
-        ds.to_zarr(output_zarr_path, group=group_name, mode='a')
+    # Set umask to create files with 775 permissions from the start
+    old_umask = os.umask(0o002)
     
-    set_zarr_permissions_recursive(output_zarr_path, 0o775)
+    try:
+        import zarr
+        import time
+        
+        # Write first storm to create the zarr store (no consolidation yet)
+        # Using path string directly works with both zarr v2 and v3
+        first_start = time.time()
+        first_ds = storms[0]
+        first_ds.to_zarr(
+            str(output_zarr_path),
+            group=f'storm_{first_ds.storm_id.item():04d}', 
+            mode='w',
+            consolidated=False
+        )
+        first_time = time.time() - first_start
+        print(f"  First storm: {first_time:.1f}s")
+
+        # Write remaining storms - xarray reuses the same store internally
+        loop_start = time.time()
+        for i, ds in enumerate(storms[1:], 1):
+            storm_start = time.time()
+            group_name = f'storm_{ds.storm_id.item():04d}'
+            ds.to_zarr(str(output_zarr_path), group=group_name, mode='a')
+            
+            # Progress updates every 10 storms
+            if i % 10 == 0:
+                elapsed = time.time() - loop_start
+                avg_per_storm = elapsed / i
+                remaining = (len(storms) - i - 1) * avg_per_storm
+                print(f"  Progress: {i}/{len(storms)-1} storms ({elapsed:.1f}s, ~{remaining:.1f}s remaining)")
+        
+        loop_time = time.time() - loop_start
+        print(f"  Remaining {len(storms)-1} storms: {loop_time:.1f}s")
+        
+        # Consolidate metadata once at the end (improves read performance)
+        consolidate_start = time.time()
+        zarr.consolidate_metadata(str(output_zarr_path))
+        consolidate_time = time.time() - consolidate_start
+        print(f"  Metadata consolidation: {consolidate_time:.1f}s")
+        
+    finally:
+        # Always restore original umask
+        os.umask(old_umask)
+    
+    # Just ensure root directory has correct permissions (files already created with umask)
+    try:
+        os.chmod(str(output_zarr_path), 0o775)
+    except Exception as e:
+        print(f"Warning: Could not set zarr root permissions: {e}")
+    
     print(f"Successfully saved {len(storms)} storms to Zarr with 775 permissions.")
 
 

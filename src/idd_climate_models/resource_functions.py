@@ -722,13 +722,18 @@ def get_level4_resources(
     # Runtime depends on total storms and scales with batch size
     runtime_minutes = predict_runtime_requirement_minutes(total_storms, draws_per_batch)
     
-    # Convert to jobmon format (round up to nearest hour)
-    runtime_hours = int(np.ceil(runtime_minutes / 60))
+    # Convert to jobmon format (round up to nearest hour), capped at 6 hours
+    runtime_hours = min(int(np.ceil(runtime_minutes / 60)), 6)
     runtime = f"{runtime_hours}h"
     
     if verbose:
-        print(f"  {basin}: {period_length}yr × {storms_per_year:.1f}storms/yr × {draws_per_batch}draws")
-        print(f"    → {total_storms:.0f} total storms → {mem} memory, {runtime} runtime ({runtime_minutes:.1f}min)")
+        predicted_hours = int(np.ceil(runtime_minutes / 60))
+        if predicted_hours > 6:
+            print(f"  {basin}: {period_length}yr × {storms_per_year:.1f}storms/yr × {draws_per_batch}draws")
+            print(f"    → {total_storms:.0f} total storms → {mem} memory, {runtime} runtime (capped from {predicted_hours}h)")
+        else:
+            print(f"  {basin}: {period_length}yr × {storms_per_year:.1f}storms/yr × {draws_per_batch}draws")
+            print(f"    → {total_storms:.0f} total storms → {mem} memory, {runtime} runtime ({runtime_minutes:.1f}min)")
     
     cores = rfc.tc_risk_n_procs + 1
     

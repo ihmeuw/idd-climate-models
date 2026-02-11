@@ -455,3 +455,302 @@ def filter_time_bins_by_targets(
         print(f"Filtered from {len(time_bins_df)} to {len(filtered_df)} time bin combinations")
     
     return filtered_df
+
+
+# ============================================================================
+# DRAW STATUS FILE FUNCTIONS
+# ============================================================================
+
+def get_draw_status_file_path(
+    model: str,
+    variant: str,
+    scenario: str,
+    time_period: str,
+    basin: str,
+    climada_input_path: Path
+) -> Path:
+    """
+    Get the path to the draw status file for a basin.
+    Status file lives in CLIMADA input folder since draw is only complete when zarr exists.
+    
+    Args:
+        model: Model name
+        variant: Variant name
+        scenario: Scenario name
+        time_period: Time period string
+        basin: Basin code
+        climada_input_path: Base path to CLIMADA inputs
+    
+    Returns:
+        Path to draw_status.csv file
+    """
+    status_dir = climada_input_path / model / variant / scenario / time_period / basin
+    return status_dir / "draw_status.csv"
+
+
+def read_draw_status(
+    model: str,
+    variant: str,
+    scenario: str,
+    time_period: str,
+    basin: str,
+    climada_input_path: Path
+) -> Optional[pd.DataFrame]:
+    """
+    Read the draw status file if it exists.
+    
+    Args:
+        model: Model name
+        variant: Variant name
+        scenario: Scenario name
+        time_period: Time period string
+        basin: Basin code
+        climada_input_path: Base path to CLIMADA inputs
+    
+    Returns:
+        DataFrame with 'draw', 'netcdf_complete', and 'zarr_complete' columns, or None if file doesn't exist
+    """
+    status_file = get_draw_status_file_path(
+        model, variant, scenario, time_period, basin, climada_input_path
+    )
+    
+    if not status_file.exists():
+        return None
+    
+    try:
+        df = pd.read_csv(status_file)
+        if 'draw' not in df.columns or 'netcdf_complete' not in df.columns or 'zarr_complete' not in df.columns:
+            print(f"Warning: Invalid draw status file format: {status_file}")
+            return None
+        return df
+    except Exception as e:
+        print(f"Warning: Could not read draw status file {status_file}: {e}")
+        return None
+
+
+def get_incomplete_draws(
+    model: str,
+    variant: str,
+    scenario: str,
+    time_period: str,
+    basin: str,
+    climada_input_path: Path
+) -> List[int]:
+    """
+    Get list of incomplete draw numbers from the status file.
+    
+    Args:
+        model: Model name
+        variant: Variant name
+        scenario: Scenario name
+        time_period: Time period string
+        basin: Basin code
+        climada_input_path: Base path to CLIMADA inputs
+    
+    Returns:
+        List of draw numbers that are incomplete (either netcdf_complete == 0 or zarr_complete == 0)
+    """
+    df = read_draw_status(
+        model, variant, scenario, time_period, basin, climada_input_path
+    )
+    
+    if df is None:
+        # No status file exists - assume all draws are incomplete
+        import idd_climate_models.constants as rfc
+        return list(range(rfc.NUM_DRAWS))
+    
+    # Draw is incomplete if either NetCDF or Zarr is missing/invalid
+    incomplete_mask = (df['netcdf_complete'] == 0) | (df['zarr_complete'] == 0)
+    incomplete = df[incomplete_mask]['draw'].tolist()
+    return incomplete
+
+
+def update_draw_status(
+    model: str,
+    variant: str,
+    scenario: str,
+    time_period: str,
+    basin: str,
+    draw_number: int,
+    netcdf_complete: bool,
+    zarr_complete: bool,
+    climada_input_path: Path
+) -> None:
+    """
+    Update the status of a single draw in the status file (with file locking).
+    
+    Args:
+        model: Model name
+        variant: Variant name
+        scenario: Scenario name
+        time_period: Time period string
+        basin: Basin code
+        draw_number: Draw number to update
+        netcdf_complete: True if NetCDF is complete, False otherwise
+        zarr_complete: True if Zarr is complete, False otherwise
+        climada_input_path: Base path to CLIMADA inputs
+    """
+    import filelock
+    
+    status_file = get_draw_status_file_path(
+        model, variant, scenario, time_period, basin, climada_input_path
+    )
+    lock_file = status_file.with_suffix('.lock')
+    
+    # Use file locking to prevent concurrent writes
+    lock = filelock.FileLock(lock_file, timeout=30)
+    
+    try:
+        with lock:
+            # Read current status
+            if status_file.exists():
+                df = pd.read_csv(status_file)
+            else:
+                # Create new status file
+                import idd_climate_models.constants as rfc
+                df = pd.DataFrame({
+                    'draw': range(rfc.NUM_DRAWS),
+                    'netcdf_complete': [0] * rfc.NUM_DRAWS,
+                    'zarr_complete': [0] * rfc.NUM_DRAWS
+                })
+            
+            # Update the specific draw
+            df.loc[df['draw'] == draw_number, 'netcdf_complete'] = 1 if netcdf_complete else 0
+            df.loc[df['draw'] == draw_number, 'zarr_complete'] = 1 if zarr_complete else 0
+            
+            # Write back
+            df.to_csv(status_file, index=False)
+            
+    except filelock.Timeout:
+        print(f"Warning: Could not acquire lock for {status_file} - skipping update")
+    except Exception as e:
+        print(f"Warning: Could not update draw status file: {e}")
+
+
+def check_draw_status_file_exists(
+    model: str,
+    variant: str,
+    scenario: str,
+    time_period: str,
+    basin: str,
+    climada_input_path: Path
+) -> bool:
+    """
+    Check if a draw status file exists for a basin.
+    
+    Args:
+        model: Model name
+        variant: Variant name
+        scenario: Scenario name
+        time_period: Time period string
+        basin: Basin code
+        climada_input_path: Base path to CLIMADA inputs
+    
+    Returns:
+        True if draw_status.csv exists, False otherwise
+    """
+    status_file = get_draw_status_file_path(
+        model, variant, scenario, time_period, basin, climada_input_path
+    )
+    return status_file.exists()
+
+
+# ============================================================================
+# TASK ASSIGNMENT FUNCTIONS
+# ============================================================================
+
+def get_task_assignments_file_path(
+    model: str,
+    variant: str,
+    scenario: str,
+    time_period: str,
+    climada_input_path: Path
+) -> Path:
+    """
+    Get the path to the task assignments file.
+    
+    Args:
+        model: Model name
+        variant: Variant name
+        scenario: Scenario name
+        time_period: Time period string
+        climada_input_path: Base path to CLIMADA inputs
+    
+    Returns:
+        Path to task_assignments.csv file
+    """
+    assignments_dir = climada_input_path / model / variant / scenario / time_period
+    return assignments_dir / "task_assignments.csv"
+
+
+def read_task_assignment(
+    model: str,
+    variant: str,
+    scenario: str,
+    time_period: str,
+    task_id: int,
+    climada_input_path: Path
+) -> Optional[pd.DataFrame]:
+    """
+    Read the draws assigned to a specific task.
+    
+    Args:
+        model: Model name
+        variant: Variant name
+        scenario: Scenario name
+        time_period: Time period string
+        task_id: Task ID to look up
+        climada_input_path: Base path to CLIMADA inputs
+    
+    Returns:
+        DataFrame with 'task_id', 'basin', 'draw' columns for this task, or None if not found
+    """
+    assignments_file = get_task_assignments_file_path(
+        model, variant, scenario, time_period, climada_input_path
+    )
+    
+    if not assignments_file.exists():
+        print(f"Warning: Task assignments file not found: {assignments_file}")
+        return None
+    
+    try:
+        df = pd.read_csv(assignments_file, keep_default_na=False)
+        task_df = df[df['task_id'] == task_id]
+        
+        if task_df.empty:
+            print(f"Warning: No assignments found for task_id {task_id}")
+            return None
+        
+        return task_df
+        
+    except Exception as e:
+        print(f"Warning: Could not read task assignments file {assignments_file}: {e}")
+        return None
+
+
+def get_total_tasks_from_assignments(
+    data_source_path: str
+) -> int:
+    """
+    Get the total number of tasks defined in the task assignments file.
+    
+    Args:
+        data_source_path: Path to data source folder (e.g., /path/to/climada/input/cmip6)
+    
+    Returns:
+        Number of unique task_ids, or 0 if file doesn't exist
+    """
+    from pathlib import Path
+    
+    assignments_file = Path(data_source_path) / "task_assignments.csv"
+    
+    if not assignments_file.exists():
+        return 0
+    
+    try:
+        df = pd.read_csv(assignments_file, keep_default_na=False)
+        return df['task_id'].nunique()
+    except Exception as e:
+        print(f"Warning: Could not read task assignments file: {e}")
+        return 0
+

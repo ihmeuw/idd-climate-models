@@ -39,6 +39,10 @@ TC_RISK_INPUT_PATH = rfc.TC_RISK_INPUT_PATH
 TC_RISK_OUTPUT_PATH = rfc.TC_RISK_OUTPUT_PATH
 TIME_BINS_DF_PATH = rfc.TIME_BINS_DF_PATH
 
+hard_coded_level_4_memory = "35G"
+# hard_coded_level_4_dask_memory = "30G"
+hard_coded_level_4_dask_memory = hard_coded_level_4_memory
+
 BUFFER = 0.2
 project = "proj_rapidresponse"
 queue = 'all.q'
@@ -48,23 +52,18 @@ SCRIPT_ROOT = rfc.REPO_ROOT / repo_name / "src" / package_name / "01_process_raw
 # Configuration
 DATA_SOURCE = "cmip6"
 NUM_DRAWS = rfc.NUM_DRAWS
-DRAWS_PER_BATCH = 2
+DRAWS_PER_BATCH = 25
 MAX_PERIOD_DURATION = 5  # Maximum time period duration in years (None = use original bins)
 TEST_RUN = 0  # Set to 0 for full run, >0 for test runs
-STARTING_LEVEL = 4  # Level to start execution from (1, 2, 3, or 4)
-ENDING_LEVEL = 4    # Level to end execution at (1, 2, 3, or 4)
+STARTING_LEVEL = 4  # Level to start execution from (0, 1, 2, 3, or 4)
+ENDING_LEVEL = 4    # Level to end execution at (0, 1, 2, 3, or 4)
 ADD_DEPENDENCIES = True  # Set to False to run levels independently without upstream dependencies
 BASINS = ['EP', 'NA', 'NI', 'SI', 'AU', 'SP', 'WP']
 HAS_BASIN_FILTER = False  # Will be set to True if using rerun CSV with basin column
 VERBOSE = False
 DELETE_EXISTING_FOLDERS = False
 CLEAN_BASIN_FOLDERS_BEFORE_LEVEL4 = False  # Delete basin folders before running Level 4
-RERUN_ALL_BASINS = True
-
-DYNAMIC_NUM_DRAWS = False
-if DYNAMIC_NUM_DRAWS:
-    CLEAN_BASIN_FOLDERS_BEFORE_LEVEL4 = False 
-
+RERUN_ALL_BASINS = False
 
 DRY_RUN = False
 
@@ -264,9 +263,9 @@ if TEST_RUN > 0:
     tasks_to_run = tasks_to_run[:TEST_RUN]
 
 # Validate level configuration
-if STARTING_LEVEL < 1 or ENDING_LEVEL > 4 or STARTING_LEVEL > ENDING_LEVEL:
+if STARTING_LEVEL < 0 or ENDING_LEVEL > 4 or STARTING_LEVEL > ENDING_LEVEL:
     print(f"\nERROR: Invalid level configuration. STARTING_LEVEL={STARTING_LEVEL}, ENDING_LEVEL={ENDING_LEVEL}")
-    print("Valid range: 1-4 and STARTING_LEVEL <= ENDING_LEVEL")
+    print("Valid range: 0-4 and STARTING_LEVEL <= ENDING_LEVEL")
     sys.exit(1)
 
 print(f"\nRunning Levels {STARTING_LEVEL} through {ENDING_LEVEL}")
@@ -342,103 +341,43 @@ if STARTING_LEVEL >= 3:
         print(f"\nLevel 4 will be checked for: {len(level4_tasks_to_check)} tasks with finished L3")
 
 # ============================================================================
-# STAGE 5: DETERMINE WHICH BASINS NEED TO RUN FOR LEVEL 4
+# STAGE 4B: DETERMINE WHICH BASINS NEED DRAW STATUS FILES (LEVEL 0 ONLY)
 # ============================================================================
-level4_basin_tasks = []
+level0_basin_tasks = []
 
-if ENDING_LEVEL >= 4:
+if STARTING_LEVEL <= 0 and ENDING_LEVEL >= 0:
     print("\n" + "=" * 80)
-    print("STEP 5: Checking Level 4 basin completeness")
+    print("STEP 4B: Determining basins for Level 0 (draw status files)")
     print("=" * 80)
     
-    # Determine which tasks to check for Level 4 based on starting level
-    if STARTING_LEVEL >= 3:
-        # level4_tasks_to_check was already defined in Stage 4
-        pass
-    else:
-        # Starting from Level 1 or 2, check all tasks
-        level4_tasks_to_check = tasks_to_run
-        
-      # List of (task, basin) pairs to run
-    
-    tc_risk_base = TC_RISK_OUTPUT_PATH / DATA_SOURCE
-    
-    for task in level4_tasks_to_check:
+    # For Level 0, we need to create draw status files for ALL basins
+    # across all model/variant/scenario/time_period combinations
+    for task in tasks_to_run:
         model, variant, scenario, time_period = task['model'], task['variant'], task['scenario'], task['time_period']
         
-        # Determine which basins to check based on filter configuration
+        # Determine which basins based on filter configuration
         if FILTER_TO_RERUN_COMBINATIONS and HAS_BASIN_FILTER:
-            # Only check basins specified in the rerun CSV for this combination
-            basins_to_check = [
+            basins_to_process = [
                 basin for (m, v, s, tp, basin) in rerun_set 
                 if m == model and v == variant and s == scenario and tp == time_period
             ]
-            if not basins_to_check:
-                continue  # Skip if no basins specified for this combination
         else:
-            # Check all basins
-            basins_to_check = BASINS
+            basins_to_process = BASINS
         
-        if RERUN_ALL_BASINS:
-            # Rerun all basins (don't check for completeness)
-            incomplete_basins = basins_to_check
-            basin_file_counts = {basin: utils.get_level4_basin_file_count(
-                model, variant, scenario, time_period, basin, tc_risk_base
-            ) for basin in basins_to_check}
-        else:
-            # Only rerun basins with incomplete draws
-            incomplete_basins = []
-            basin_file_counts = {}
-            
-            for basin in basins_to_check:
-                file_count = utils.get_level4_basin_file_count(
-                    model, variant, scenario, time_period, basin, tc_risk_base
-                )
-                basin_file_counts[basin] = file_count
-                
-                # Basin is incomplete if it has fewer than NUM_DRAWS + 1 files
-                if file_count < NUM_DRAWS + 1:
-                    incomplete_basins.append(basin)
-        
-        if incomplete_basins:
-            for basin in incomplete_basins:
-                level4_basin_tasks.append({
-                    'model': model,
-                    'variant': variant,
-                    'scenario': scenario,
-                    'time_period': time_period,
-                    'basin': basin,
-                    'file_count': basin_file_counts[basin],
-                    'level3_finished': task in level3_finished if STARTING_LEVEL >= 3 else False
-                })
+        for basin in basins_to_process:
+            level0_basin_tasks.append({
+                'model': model,
+                'variant': variant,
+                'scenario': scenario,
+                'time_period': time_period,
+                'basin': basin
+            })
     
-    print(f"\nLevel 4 basin tasks to create: {len(level4_basin_tasks)}")
-    
-    if VERBOSE and level4_basin_tasks:
-        print(f"\nFirst 20 Level 4 basin tasks:")
-        for i, task in enumerate(level4_basin_tasks[:20]):
-            l3_status = "L3✓" if task['level3_finished'] else "L3✗"
-            print(f"  {task['model']}/{task['variant']}/{task['scenario']}/{task['time_period']}/{task['basin']} ({task['file_count']} files, {l3_status})")
-        if len(level4_basin_tasks) > 20:
-            print(f"  ... and {len(level4_basin_tasks) - 20} more")
-    
-    # Clean basin folders before running if enabled (parallelized for speed)
-    if CLEAN_BASIN_FOLDERS_BEFORE_LEVEL4 and level4_basin_tasks:
-        print(f"\nCleaning {len(level4_basin_tasks)} basin folders in parallel...")
-        
-        # Get data source path (remove data_source prefix from TC_RISK_OUTPUT_PATH)
-        tc_risk_base = TC_RISK_OUTPUT_PATH / DATA_SOURCE
-        climada_base = rfc.CLIMADA_INPUT_PATH / DATA_SOURCE
-        
-        cleaned_count = utils.clean_all_basin_outputs_parallel(
-            tasks=level4_basin_tasks,
-            tc_risk_output_path=tc_risk_base,
-            climada_input_path=climada_base,
-            max_workers=10,
-            verbose=VERBOSE
-        )
-        
-        print(f"Finished cleaning {cleaned_count}/{len(level4_basin_tasks)} basin folders")
+    print(f"\nLevel 0 basin tasks (draw status files): {len(level0_basin_tasks)}")
+    if VERBOSE and level0_basin_tasks:
+        print(f"First 10:")
+        for i, task in enumerate(level0_basin_tasks[:10]):
+            print(f"  {task['model']}/{task['variant']}/{task['scenario']}/{task['time_period']}/{task['basin']}")
 
 # ============================================================================
 # JOBMON SETUP & TEMPLATES
@@ -466,6 +405,42 @@ workflow.set_default_compute_resources_from_dict(
         "memory": "2G", "cores": 1, "runtime": "10m",
         "queue": queue, "project": project,
     }
+)
+
+# --- Template 0-A: Create Draw Status File (Level 0) ---
+draw_status_template = tool.get_task_template(
+    template_name="create_draw_status_file",
+    default_cluster_name="slurm",
+    default_compute_resources={
+        "memory": "2G", "cores": 1, "runtime": "1h",
+        "queue": queue, "project": project,
+    },
+    command_template=(
+        "python {script_root}/00_create_draw_status_file.py "
+        "--data_source {{data_source}} "
+        "--model {{model}} "
+        "--variant {{variant}} "
+        "--scenario {{scenario}} "
+        "--time_period {{time_period}} "
+        "--basin {{basin}} "
+    ).format(script_root=SCRIPT_ROOT),
+    node_args=["data_source", "model", "variant", "scenario", "time_period", "basin"],
+)
+
+# --- Template 0-B: Create Task Assignments (Level 0) ---
+task_assignment_template = tool.get_task_template(
+    template_name="create_task_assignments",
+    default_cluster_name="slurm",
+    default_compute_resources={
+        "memory": "2G", "cores": 1, "runtime": "5m",
+        "queue": queue, "project": project,
+    },
+    command_template=(
+        "python {script_root}/00_create_task_assignments.py "
+        "--data_source {{data_source}} "
+        "--draws_per_batch {{draws_per_batch}} "
+    ).format(script_root=SCRIPT_ROOT),
+    node_args=["data_source", "draws_per_batch"],
 )
 
 # --- Template 1: Folder Creation (Level 1) ---
@@ -517,7 +492,7 @@ global_run_template = tool.get_task_template(
     template_name="run_global_tc_risk",
     default_cluster_name="slurm",
     default_compute_resources={
-        "memory": "40G", "cores": rfc.tc_risk_n_procs + 1, "runtime": "1h",
+        "memory": "40G", "cores": rfc.tc_risk_n_procs + 4, "runtime": "1h",
         "queue": queue, "project": project,
     },
     command_template=(
@@ -531,13 +506,13 @@ global_run_template = tool.get_task_template(
     node_args=["data_source", "model", "variant", "scenario", "time_period"],
 )
 
-# --- Template 4: Basin TC-Risk Run ---
+# --- Template 4: Basin TC-Risk Run (task-based only) ---
 basin_run_template = tool.get_task_template(
     template_name="run_basin_tc_risk",
     default_cluster_name="slurm",
     default_compute_resources={
         "memory": "25G", 
-        "cores": rfc.tc_risk_n_procs + 1, 
+        "cores": rfc.tc_risk_n_procs + 4, 
         "runtime": "4h",
         "queue": queue, 
         "project": project,
@@ -545,16 +520,10 @@ basin_run_template = tool.get_task_template(
     command_template=(
         "python {script_root}/05_run_basin_tc_risk.py "
         "--data_source {{data_source}} "
-        "--model {{model}} "
-        "--variant {{variant}} "
-        "--scenario {{scenario}} "
-        "--time_period {{time_period}} "
-        "--basin {{basin}} "
-        "--draw_start {{draw_start}} "
-        "--draw_end {{draw_end}} "
+        "--task_id {{task_id}} "
         "--total_memory {{total_memory}} "
     ).format(script_root=SCRIPT_ROOT),
-    node_args=["data_source", "model", "variant", "scenario", "time_period", "basin", "draw_start", "draw_end", "total_memory"],
+    node_args=["data_source", "task_id", "total_memory"],
 )
 
 # ============================================================================
@@ -567,6 +536,41 @@ print("=" * 80)
 
 all_tasks = []
 dependencies = []
+
+# ========== LEVEL 0 ==========
+level0_draw_status_tasks = []
+level0_task_assignment_task = None
+
+if STARTING_LEVEL <= 0 and ENDING_LEVEL >= 0:
+    print(f"Creating Level 0 tasks: {len(level0_basin_tasks)} draw status files")
+    
+    # Level 0-A: Create draw status file for each basin
+    for task_info in level0_basin_tasks:
+        draw_status_task = draw_status_template.create_task(
+            data_source=DATA_SOURCE,
+            model=task_info['model'],
+            variant=task_info['variant'],
+            scenario=task_info['scenario'],
+            time_period=task_info['time_period'],
+            basin=task_info['basin'],
+        )
+        all_tasks.append(draw_status_task)
+        level0_draw_status_tasks.append(draw_status_task)
+    
+    # Level 0-B: Create task assignments (depends on all draw status files)
+    level0_task_assignment_task = task_assignment_template.create_task(
+        data_source=DATA_SOURCE,
+        draws_per_batch=str(DRAWS_PER_BATCH),
+    )
+    all_tasks.append(level0_task_assignment_task)
+    
+    # Dependencies: task assignment depends on all draw status files
+    if ADD_DEPENDENCIES:
+        for draw_status_task in level0_draw_status_tasks:
+            dependencies.append((level0_task_assignment_task, draw_status_task))
+    
+    print(f"  Created {len(level0_draw_status_tasks)} draw status tasks")
+    print(f"  Created 1 task assignment task")
 
 # ========== LEVELS 1 & 2 ==========
 level2_tasks_dict = {}
@@ -681,71 +685,85 @@ if STARTING_LEVEL <= 3 and ENDING_LEVEL >= 3:
                 for process_task in level2_tasks_dict[mvst_key]:
                     dependencies.append((global_task, process_task))
 
-# ========== LEVEL 4 (BATCHED) ==========
+# ========== LEVEL 4 (TASK-BASED) ==========
 if STARTING_LEVEL <= 4 and ENDING_LEVEL >= 4:
-    # NOTE: Regression models are now built into get_level4_resources() function
-    # The following code block is kept for reference but is no longer used:
-    # 
-    # regression_model = BatchSizeRegression()
-    # regression_model.intercept = -1.61
-    # regression_model.slope = 0.17480
-    # regression_model.buffer = 15.86 * (1 + BUFFER)
-    # regression_model.buffer_pct = 10.0
-    # regression_model.r_squared = 0.5685
-    # regression_model.model = LinearRegression()
-    # regression_model.model.coef_ = [regression_model.slope]
-    # regression_model.model.intercept_ = regression_model.intercept
+    # Check if task_assignments.csv exists
+    task_assignments_path = rfc.CLIMADA_INPUT_PATH / DATA_SOURCE / "task_assignments.csv"
     
-    for basin_task_info in level4_basin_tasks:
-        model_name = basin_task_info['model']
-        variant_name = basin_task_info['variant']
-        scenario_name = basin_task_info['scenario']
-        time_period_str = basin_task_info['time_period']
-        basin = basin_task_info['basin']
+    if not task_assignments_path.exists():
+        print(f"\n⚠️  ERROR: task_assignments.csv not found at {task_assignments_path}")
+        print("\nLevel 4 now requires task assignments. You have two options:")
+        print("  1. Run orchestrator with STARTING_LEVEL=0 first to create draw status files and task assignments")
+        print("  2. Manually create task_assignments.csv with columns: task_id, basin, draw")
+        print("\nFor a simple 'run all draws' setup, you can create uniform task assignments:")
+        print("  - Task 1: all basins, draws 0-24")
+        print("  - Task 2: all basins, draws 25-49")
+        print("  - etc.")
+        sys.exit(1)
+    
+    print(f"\nUsing task assignments from {task_assignments_path}")
+    
+    # Read task assignments CSV to determine resources per task
+    df_assignments = pd.read_csv(task_assignments_path, keep_default_na=False)
+    total_tasks = df_assignments['task_id'].nunique()
+    print(f"Total task IDs in assignments: {total_tasks}")
+    
+    # Create one Jobmon task per task_id with appropriate resources
+    for task_id in range(1, total_tasks + 1):
+        # Get the rows for this task
+        task_rows = df_assignments[df_assignments['task_id'] == task_id]
         
-        mvst_key = (model_name, variant_name, scenario_name, time_period_str)
-        # Create batches of draws
-        # With 250 total draws (0-249) and DRAWS_PER_BATCH=10:
-        # Batch 0: draws 0-9
-        # Batch 1: draws 10-19
-        # ...
-        # Batch 24: draws 240-249
+        if task_rows.empty:
+            print(f"Warning: No assignments found for task_id {task_id}, skipping")
+            continue
         
-        num_batches = (NUM_DRAWS + DRAWS_PER_BATCH - 1) // DRAWS_PER_BATCH
+        # Extract combination details (should be same for all rows in this task)
+        model = task_rows['model'].iloc[0]
+        variant = task_rows['variant'].iloc[0]
+        scenario = task_rows['scenario'].iloc[0]
+        time_period = task_rows['time_period'].iloc[0]
+        basin = task_rows['basin'].iloc[0]
+        num_draws = len(task_rows)  # Number of draws in this task
         
-        for batch_idx in range(num_batches):
-            batch_start = batch_idx * DRAWS_PER_BATCH
-            batch_end = min(batch_start + DRAWS_PER_BATCH - 1, NUM_DRAWS - 1)
-            
-            resources = get_level4_resources(
-                model_name, variant_name, scenario_name, 
-                time_period_str, basin, DRAWS_PER_BATCH,
-                verbose=VERBOSE
-            )
-            basin_task = basin_run_template.create_task(
-                compute_resources={
-                    "memory": resources["memory"],
-                    "cores": resources["cores"],
-                    "runtime": resources["runtime"],
-                    "queue": queue,
-                    "project": project,
-                },
-                data_source=DATA_SOURCE,
-                model=model_name,
-                variant=variant_name,
-                scenario=scenario_name,
-                time_period=time_period_str,
-                basin=basin,
-                draw_start=batch_start,
-                draw_end=batch_end,
-                total_memory=resources["memory"],
-            )
-            all_tasks.append(basin_task)
+        # Calculate resources based on actual combination
+        resources = get_level4_resources(
+            model=model,
+            variant=variant,
+            scenario=scenario,
+            time_period=time_period,
+            basin=basin,
+            draws_per_batch=num_draws,
+            verbose=False
+        )
+        
+        
 
-            # Dependency: basin_task depends on global_task (if Level 3 is running/will run)
-            if ADD_DEPENDENCIES and STARTING_LEVEL <= 3:
-                if mvst_key in level3_tasks_dict:
-                    dependencies.append((basin_task, level3_tasks_dict[mvst_key]))
+        basin_task = basin_run_template.create_task(
+            compute_resources={
+                # "memory": resources["memory"],
+                "memory": hard_coded_level_4_memory, 
+                "cores": rfc.tc_risk_n_procs + 4,
+                "runtime": resources["runtime"],
+                "queue": queue,
+                "project": project,
+            },
+            data_source=DATA_SOURCE,
+            task_id=str(task_id),
+            total_memory=hard_coded_level_4_dask_memory,
+        )
+        all_tasks.append(basin_task)
+        
+        # Dependencies: basin task depends on task assignment (if Level 0-B ran)
+        if ADD_DEPENDENCIES:
+            if level0_task_assignment_task is not None:
+                dependencies.append((basin_task, level0_task_assignment_task))
+            
+            # Depend on all Level 3 tasks (since we don't know which basins this task will process)
+            elif STARTING_LEVEL <= 3:
+                for global_task in level3_tasks_dict.values():
+                    dependencies.append((basin_task, global_task))
+    
+    print(f"Created {total_tasks} task-based Level 4 tasks")
 
 print(f"\nTotal tasks created: {len(all_tasks)}")
 print(f"Total dependencies: {len(dependencies)}")
@@ -770,16 +788,32 @@ if DRY_RUN:
     print("\n" + "=" * 80)
     print("DRY RUN: Tasks that would be executed")
     print("=" * 80)
-
-    if level4_basin_tasks:
-        print(f"\nTotal Level 4 basin tasks: {len(level4_basin_tasks)}\n")
-        print("Task details:")
-        for i, basin_task_info in enumerate(level4_basin_tasks):
-            num_draws_for_task = max(0, NUM_DRAWS - basin_task_info['file_count']) if DYNAMIC_NUM_DRAWS else NUM_DRAWS
-            print(f"{i+1}. {basin_task_info['model']}/{basin_task_info['variant']}/{basin_task_info['scenario']}/{basin_task_info['time_period']}/{basin_task_info['basin']}")
-            print(f"   Current files: {basin_task_info['file_count']}, Num draws to run: {num_draws_for_task}")
-    else:
-        print("\nNo Level 4 basin tasks to run.")
+    
+    print(f"\nTotal Jobmon tasks to create: {len(all_tasks)}")
+    print(f"Total dependencies: {len(dependencies)}")
+    print(f"Levels: {STARTING_LEVEL} through {ENDING_LEVEL}")
+    
+    # Show Level 4 task assignment summary if executing Level 4
+    if ENDING_LEVEL >= 4:
+        task_assignments_path = rfc.CLIMADA_INPUT_PATH / DATA_SOURCE / "task_assignments.csv"
+        if task_assignments_path.exists():
+            df_assignments = pd.read_csv(task_assignments_path, keep_default_na=False)
+            total_task_ids = df_assignments['task_id'].nunique()
+            total_draws = len(df_assignments)
+            basins = df_assignments['basin'].unique()
+            
+            print(f"\nLevel 4 task assignments:")
+            print(f"  Task IDs: {total_task_ids}")
+            print(f"  Total draws: {total_draws}")
+            print(f"  Basins: {', '.join(sorted(basins))}")
+            
+            # Show first few task assignments
+            print(f"\n  First 5 task assignments:")
+            for task_id in sorted(df_assignments['task_id'].unique())[:5]:
+                task_df = df_assignments[df_assignments['task_id'] == task_id]
+                basins_list = task_df['basin'].unique()
+                draws_list = sorted(task_df['draw'].unique())
+                print(f"    Task {task_id}: {len(draws_list)} draws across {len(basins_list)} basins (draws {draws_list[0]}-{draws_list[-1]})")
 
     print("\n" + "=" * 80)
     print("To actually run the workflow, comment out or remove the sys.exit() below")

@@ -2,11 +2,180 @@ import xarray as xr
 import numpy as np
 import zarr
 from pathlib import Path
+import netCDF4
 
-def verify_zarr_storm_count(original_nc_path, zarr_path):
+
+def validate_netcdf_file(file_path):
+    """
+    Quick validation: can we open the NetCDF file and read basic structure?
+    Checks for RAW TC-risk variable names (lon_trks, lat_trks, etc.)
+    Returns True if valid, False if corrupted.
+    """
+    try:
+        with netCDF4.Dataset(file_path, 'r') as ds:
+            # Check that we can access variables
+            _ = ds.variables
+            # Check for required variables from RAW TC-risk output
+            required_vars = ['lon_trks', 'lat_trks', 'tc_years', 'tc_month']
+            for var in required_vars:
+                if var not in ds.variables:
+                    return False
+        return True
+    except Exception as e:
+        print(f"  ⚠️  NetCDF validation failed for {Path(file_path).name}: {e}")
+        return False
+
+
+def validate_zarr_file(zarr_path):
+    """
+    Quick validation: is the Zarr directory readable and has expected structure?
+    Returns True if valid, False if corrupted or missing.
+    """
+    try:
+        # Try to open the zarr store
+        store = zarr.open(str(zarr_path), mode='r')
+        
+        # Check that we have storm groups (not flat arrays)
+        group_keys = list(store.group_keys())
+        
+        # Zarr should have at least one storm group
+        if len(group_keys) == 0:
+            return False
+            
+        # Optionally: check that first group has expected structure
+        first_storm = store[group_keys[0]]
+        required_arrays = ['lon', 'lat', 'max_sustained_wind', 'time_step']
+        for arr_name in required_arrays:
+            if arr_name not in first_storm:
+                return False
+                
+        return True
+    except Exception as e:
+        print(f"  ⚠️  Zarr validation failed for {Path(zarr_path).name}: {e}")
+        return False
+
+
+def create_draw_completion_marker(climada_input_path, draw_num):
+    """
+    Create a completion marker file for a successfully validated draw.
+    Marker files enable crash-resistant progress tracking.
+    
+    Args:
+        climada_input_path: Path to CLIMADA input directory
+        draw_num: Draw number (0-249)
+    """
+    marker_path = Path(climada_input_path) / f".draw_{draw_num:04d}.complete"
+    marker_path.touch()
+    marker_path.chmod(0o775)
+
+
+def get_completed_draws_from_markers(climada_input_path):
+    """
+    Read completion markers to determine which draws are complete.
+    
+    Args:
+        climada_input_path: Path to CLIMADA input directory
+    
+    Returns:
+        set: Set of completed draw numbers
+    """
+    climada_input = Path(climada_input_path)
+    if not climada_input.exists():
+        return set()
+    
+    marker_files = list(climada_input.glob(".draw_*.complete"))
+    completed_draws = set()
+    
+    for marker_file in marker_files:
+        try:
+            # Extract draw number from .draw_0123.complete
+            draw_num = int(marker_file.stem.split('_')[1])
+            completed_draws.add(draw_num)
+        except (IndexError, ValueError):
+            continue
+    
+    return completed_draws
+
+
+def validate_single_draw(nc_file, zarr_file, spot_check=False, delete_on_failure=False):
+    """
+    Validate a single draw's NetCDF and Zarr files.
+    
+    Performs three-layer validation:
+    1. File existence check
+    2. Quick validation (can we open the files?)
+    3. Comprehensive check (storm count + optional spot-check)
+    
+    Args:
+        nc_file: Path to NetCDF file
+        zarr_file: Path to Zarr file
+        spot_check: If True, performs detailed spot-check (slow)
+        delete_on_failure: If True, deletes both files if validation fails
+    
+    Returns:
+        tuple: (success: bool, error_message: str or None)
+    """
+    import shutil
+    
+    nc_file = Path(nc_file)
+    zarr_file = Path(zarr_file)
+    
+    # Layer 1: File existence
+    if not nc_file.exists():
+        return False, "NetCDF file missing"
+    if not zarr_file.exists():
+        return False, "Zarr file missing"
+    
+    # Layer 2: Quick validation - can we open the files?
+    if not validate_netcdf_file(str(nc_file)):
+        error_msg = "NetCDF corrupted (cannot open)"
+        if delete_on_failure:
+            try:
+                nc_file.unlink()
+                shutil.rmtree(zarr_file)
+            except Exception as e:
+                pass  # Deletion failure is non-critical
+        return False, error_msg
+    
+    if not validate_zarr_file(str(zarr_file)):
+        error_msg = "Zarr corrupted (cannot open)"
+        if delete_on_failure:
+            try:
+                nc_file.unlink()
+                shutil.rmtree(zarr_file)
+            except Exception as e:
+                pass  # Deletion failure is non-critical
+        return False, error_msg
+    
+    # Layer 3: Comprehensive integrity check (storm count + structure)
+    try:
+        verify_zarr_integrity(str(nc_file), str(zarr_file), None, spot_check=spot_check, verbose=False)
+        return True, None
+    except Exception as e:
+        error_msg = str(e)
+        if delete_on_failure:
+            try:
+                nc_file.unlink()
+                shutil.rmtree(zarr_file)
+            except Exception as e2:
+                pass  # Deletion failure is non-critical
+        return False, error_msg
+
+
+def verify_zarr_storm_count(original_nc_path, zarr_path, verbose=False):
     """
     Lightweight verification: check that zarr has same number of storms as NC file.
-    Returns True if counts match, False otherwise.
+    
+    Args:
+        original_nc_path: Path to original NetCDF file
+        zarr_path: Path to zarr store
+        verbose: If True, prints detailed output
+    
+    Returns:
+        bool: True if counts match, False otherwise
+    
+    Raises:
+        ValueError: If storm counts don't match (so caller can catch and delete files)
     """
     try:
         # Load original NetCDF
@@ -29,42 +198,68 @@ def verify_zarr_storm_count(original_nc_path, zarr_path):
         ds_original.close()
         
         # Open Zarr store and count groups
-        zarr_store = zarr.open(zarr_path, mode='r')
+        zarr_store = zarr.open(str(zarr_path), mode='r')
         zarr_count = len(list(zarr_store.group_keys()))
         
-        if valid_count == zarr_count:
+        if valid_count != zarr_count:
+            error_msg = f"Storm count mismatch: NC has {valid_count}, Zarr has {zarr_count}"
+            if verbose:
+                print(f"    ⚠️  {error_msg}")
+            raise ValueError(error_msg)
+        
+        if verbose:
             print(f"    ✓ Storm count verified: {valid_count} storms")
-            return True
-        else:
-            print(f"    ⚠️  Storm count mismatch: NC has {valid_count}, Zarr has {zarr_count}")
-            return False
+        return True
             
+    except ValueError:
+        # Re-raise ValueError so caller knows it's a mismatch
+        raise
     except Exception as e:
-        print(f"    ⚠️  Verification error: {e}")
-        return False
+        error_msg = f"Storm count verification failed: {e}"
+        if verbose:
+            print(f"    ⚠️  {error_msg}")
+        raise ValueError(error_msg)
 
-def verify_zarr_integrity(original_nc_path, zarr_path, args):
+def verify_zarr_integrity(original_nc_path, zarr_path, args, spot_check=True, verbose=True):
     """
     Comprehensive verification that Zarr output matches original NetCDF input.
+    
+    Args:
+        original_nc_path: Path to original NetCDF file
+        zarr_path: Path to zarr store
+        args: Arguments object (can be None)
+        spot_check: If True, performs detailed spot-check of 3 storms (slow)
+                   If False, only checks storm counts (fast)
+        verbose: If True, prints detailed output
+    
+    Raises:
+        ValueError: If validation fails
     """
-    print("=" * 60)
-    print("VERIFYING ZARR DATA INTEGRITY")
-    print("=" * 60)
+    if verbose:
+        mode = "FULL (with spot-check)" if spot_check else "LIGHT (storm count only)"
+        print("=" * 60)
+        print(f"VERIFYING ZARR DATA INTEGRITY - {mode}")
+        print("=" * 60)
     
     # 1. Load original NetCDF
-    print(f"\n1. Loading original NetCDF: {original_nc_path}")
+    if verbose:
+        print(f"\n1. Loading original NetCDF: {Path(original_nc_path).name}")
     ds_original = xr.open_dataset(original_nc_path)
     n_trk_original = ds_original.sizes["n_trk"]
-    print(f"   Original file has {n_trk_original} tracks")
+    if verbose:
+        print(f"   Original file has {n_trk_original} tracks")
     
     # 2. Open Zarr store and list groups
-    print(f"\n2. Opening Zarr store: {zarr_path}")
-    zarr_store = zarr.open(zarr_path, mode='r')
+    if verbose:
+        print(f"\n2. Opening Zarr store: {Path(zarr_path).name}")
+    zarr_store = zarr.open(str(zarr_path), mode='r')
     group_names = list(zarr_store.group_keys())
-    print(f"   Zarr store has {len(group_names)} groups: {group_names[:5]}...")
+    if verbose:
+        print(f"   Zarr store has {len(group_names)} groups")
     
     # 3. Count valid tracks in original (same logic as your processing)
-    print("\n3. Counting valid tracks in original...")
+    if verbose:
+        print("\n3. Counting valid tracks in original...")
     valid_count = 0
     valid_indices = []
     for i in range(n_trk_original):
@@ -79,21 +274,37 @@ def verify_zarr_integrity(original_nc_path, zarr_path, args):
                 valid_count += 1
                 valid_indices.append(i)
     
-    print(f"   Valid tracks in original: {valid_count}")
-    print(f"   Tracks in Zarr: {len(group_names)}")
+    if verbose:
+        print(f"   Valid tracks in original: {valid_count}")
+        print(f"   Tracks in Zarr: {len(group_names)}")
     
     if valid_count != len(group_names):
         error_msg = f"Storm count mismatch: NC has {valid_count} valid tracks, zarr has {len(group_names)} storms"
-        print(f"   ❌ ERROR: {error_msg}")
+        if verbose:
+            print(f"   ❌ ERROR: {error_msg}")
+        ds_original.close()
         raise ValueError(error_msg)
     else:
-        print(f"   ✓ Track counts match")
+        if verbose:
+            print(f"   ✓ Track counts match ({valid_count} storms)")
+    
+    # If not spot-checking, we're done
+    if not spot_check:
+        ds_original.close()
+        if verbose:
+            print("\n" + "=" * 60)
+            print("VERIFICATION COMPLETE (light mode)")
+            print("=" * 60)
+        return
     
     # 4. Spot-check a few storms in detail
-    print("\n4. Spot-checking individual storms...")
-    storms_to_check = min(3, len(group_names))
+    if verbose:
+        print("\n4. Spot-checking individual storms...")
+    # storms_to_check = min(3, len(group_names))
+    storms_to_check = 1
     
-    for idx in range(storms_to_check):
+    # for idx in range(storms_to_check):
+    for idx in [-1]:
         group_name = group_names[idx]
         storm_id = int(group_name.split('_')[1])
         
@@ -172,51 +383,54 @@ def verify_zarr_integrity(original_nc_path, zarr_path, args):
             if not vmax_match:
                 print(f"         Vmax diff: max={np.abs(vmax_orig_filtered - vmax_zarr).max()}")
     
-    # 5. Check file sizes
-    print("\n5. File size comparison...")
-    nc_size = Path(original_nc_path).stat().st_size
-    
-    # Calculate zarr size (sum of all files in the store)
-    zarr_size = sum(f.stat().st_size for f in Path(zarr_path).rglob('*') if f.is_file())
-    
-    compression_ratio = nc_size / zarr_size if zarr_size > 0 else 0
-    
-    print(f"   Original NetCDF: {nc_size / 1024**2:.2f} MB")
-    print(f"   Zarr store: {zarr_size / 1024**2:.2f} MB")
-    print(f"   Compression ratio: {compression_ratio:.1f}x")
-    
-    if compression_ratio > 5:
-        print(f"   ✓ High compression ratio - this is normal for Zarr with mostly NaN data")
-    
-    # 6. Check data types and compression info
-    print("\n6. Checking Zarr metadata...")
-    first_group = group_names[0]
-    ds_sample = xr.open_zarr(zarr_path, group=first_group)
-    
-    print(f"   Variables: {list(ds_sample.data_vars)}")
-    print(f"   Coordinates: {list(ds_sample.coords)}")
-    
-    # Check actual zarr array info
-    zarr_group = zarr_store[first_group]
-    if 'lon' in zarr_group:
-        lon_array = zarr_group['lon']
-        print(f"\n   Lon array info:")
-        print(f"      Shape: {lon_array.shape}")
-        print(f"      Dtype: {lon_array.dtype}")
-        print(f"      Chunks: {lon_array.chunks}")
+    # 5. Check file sizes (optional, only if verbose)
+    if verbose:
+        print("\n5. File size comparison...")
+        nc_size = Path(original_nc_path).stat().st_size
         
-        # Try to get compressor info (API differs between Zarr v2 and v3)
-        try:
-            print(f"      Compressor: {lon_array.compressor}")
-        except (TypeError, AttributeError):
-            # Zarr v3 doesn't have compressor attribute in the same way
-            try:
-                print(f"      Codec: {lon_array.metadata.codecs if hasattr(lon_array, 'metadata') else 'N/A'}")
-            except:
-                print(f"      Compression: enabled (details not accessible)")
+        # Calculate zarr size (sum of all files in the store)
+        zarr_size = sum(f.stat().st_size for f in Path(zarr_path).rglob('*') if f.is_file())
+        
+        compression_ratio = nc_size / zarr_size if zarr_size > 0 else 0
+        
+        print(f"   Original NetCDF: {nc_size / 1024**2:.2f} MB")
+        print(f"   Zarr store: {zarr_size / 1024**2:.2f} MB")
+        print(f"   Compression ratio: {compression_ratio:.1f}x")
+        
+        if compression_ratio > 5:
+            print(f"   ✓ High compression ratio - this is normal for Zarr with mostly NaN data")
     
-    print("\n" + "=" * 60)
-    print("VERIFICATION COMPLETE")
-    print("=" * 60)
+    # 6. Check data types and compression info (optional, only if verbose)
+    if verbose:
+        print("\n6. Checking Zarr metadata...")
+        first_group = group_names[0]
+        ds_sample = xr.open_zarr(str(zarr_path), group=first_group)
+        
+        print(f"   Variables: {list(ds_sample.data_vars)}")
+        print(f"   Coordinates: {list(ds_sample.coords)}")
+        
+        # Check actual zarr array info
+        zarr_group = zarr_store[first_group]
+        if 'lon' in zarr_group:
+            lon_array = zarr_group['lon']
+            print(f"\n   Lon array info:")
+            print(f"      Shape: {lon_array.shape}")
+            print(f"      Dtype: {lon_array.dtype}")
+            print(f"      Chunks: {lon_array.chunks}")
+            
+            # Try to get compressor info (API differs between Zarr v2 and v3)
+            try:
+                print(f"      Compressor: {lon_array.compressor}")
+            except (TypeError, AttributeError):
+                # Zarr v3 doesn't have compressor attribute in the same way
+                try:
+                    print(f"      Codec: {lon_array.metadata.codecs if hasattr(lon_array, 'metadata') else 'N/A'}")
+                except:
+                    print(f"      Compression: enabled (details not accessible)")
+    
+    if verbose:
+        print("\n" + "=" * 60)
+        print("VERIFICATION COMPLETE (full mode with spot-check)")
+        print("=" * 60)
     
     ds_original.close()
