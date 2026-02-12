@@ -51,32 +51,6 @@ def get_draw_files_for_basin(data_source, model, variant, scenario, time_period,
     return draw_files
 
 
-def get_zarr_files_for_basin(data_source, model, variant, scenario, time_period, basin):
-    """
-    Get all zarr directories (post-processed outputs) for a basin.
-    
-    Returns:
-        dict: {draw_num: zarr_path}
-    """
-    climada_path = rfc.CLIMADA_INPUT_PATH / data_source / model / variant / scenario / time_period / basin
-    
-    if not climada_path.exists():
-        return {}
-    
-    zarr_files = {}
-    
-    # Pattern: storm_list_GL_0.zarr, storm_list_GL_1.zarr, etc.
-    for zarr_dir in climada_path.glob(f"storm_list_{basin}_*.zarr"):
-        try:
-            # Extract draw number from filename
-            draw_str = zarr_dir.stem.split('_')[-1]
-            draw_num = int(draw_str)
-            zarr_files[draw_num] = zarr_dir
-        except (ValueError, IndexError):
-            continue
-    
-    return zarr_files
-
 
 def check_for_duplicates(draw_files):
     """Check if any draw numbers appear twice (race condition indicator)."""
@@ -97,7 +71,6 @@ def check_basin_status(data_source, model, variant, scenario, time_period, basin
         dict: Status information
     """
     draw_files = get_draw_files_for_basin(data_source, model, variant, scenario, time_period, basin)
-    zarr_files = get_zarr_files_for_basin(data_source, model, variant, scenario, time_period, basin)
     
     # Check for gaps in draw sequence
     present_draws = sorted(draw_files.keys())
@@ -106,10 +79,6 @@ def check_basin_status(data_source, model, variant, scenario, time_period, basin
     
     # Check for duplicates (RACE CONDITION)
     duplicates = check_for_duplicates(draw_files)
-    
-    # Check zarr post-processing
-    zarr_draws = sorted(zarr_files.keys())
-    missing_zarr = sorted(set(present_draws) - set(zarr_draws))
     
     # Identify which batches are complete/incomplete
     num_batches = (expected_draws + draws_per_batch - 1) // draws_per_batch
@@ -137,10 +106,8 @@ def check_basin_status(data_source, model, variant, scenario, time_period, basin
         'expected_draws': expected_draws,
         'missing_draws': missing_draws,
         'duplicates': duplicates,
-        'zarr_count': len(zarr_draws),
-        'missing_zarr': missing_zarr,
         'batch_status': batch_status,
-        'complete': len(present_draws) == expected_draws and len(missing_zarr) == 0
+        'complete': len(present_draws) == expected_draws
     }
 
 
@@ -170,14 +137,6 @@ def print_basin_status(status):
         else:
             print(f"  First 10: {status['missing_draws'][:10]}")
             print(f"  Last 10: {status['missing_draws'][-10:]}")
-    
-    # Zarr post-processing status
-    zarr_pct = (status['zarr_count'] / status['total_draws'] * 100) if status['total_draws'] > 0 else 0
-    print(f"\nPost-processing (Zarr): {status['zarr_count']}/{status['total_draws']} ({zarr_pct:.1f}%)")
-    if status['missing_zarr']:
-        print(f"  Missing zarr for {len(status['missing_zarr'])} draws")
-        if len(status['missing_zarr']) <= 10:
-            print(f"  {status['missing_zarr']}")
     
     # Batch status summary
     complete_batches = sum(1 for b in status['batch_status'].values() if b['complete'])

@@ -6,5 +6,9 @@
 #SBATCH --partition=all.q
 #SBATCH --account=proj_rapidresponse
 
+# Activate conda environment
+source /ihme/homes/bcreiner/miniconda/etc/profile.d/conda.sh
+conda activate idd-climate-models
+
 # Test a task with actual Level 4 resource constraints
-python 05_run_basin_tc_risk.py --data_source cmip6 --task_id 1
+python 05_run_basin_tc_risk.py --data_source cmip6 --task_id 1 --total_memory 25G

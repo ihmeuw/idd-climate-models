@@ -36,7 +36,7 @@ Level 4: Run basin TC-risk (21,338 parallel tasks)
 - **Runtime:** Capped at 6 hours (formula often predicts higher, but actual ~1.2s/storm)
 
 ### Key Paths
-- Task assignments: `/mnt/team/rapidresponse/pub/tropical-storms/climada/input/cmip6/task_assignments.csv`
+- Task assignments: `/mnt/team/rapidresponse/pub/tropical-storms/climada/input/cmip6/level_4_task_assignments.csv`
 - CLIMADA input: `/mnt/team/rapidresponse/pub/tropical-storms/climada/input/`
 - TC-risk output: `/mnt/team/rapidresponse/pub/tropical-storms/tc_risk/output/`
 - Draw status files: `{CLIMADA_INPUT_PATH}/{data_source}/{model}/{variant}/{scenario}/{time_period}/{basin}/draw_status.csv`
@@ -52,7 +52,7 @@ Level 4: Run basin TC-risk (21,338 parallel tasks)
 **Fix:** Added `keep_default_na=False` to all `pd.read_csv()` calls that handle basin data:
 - `00_orchestrator.py` (line 782)
 - `orchestrator_utils.py` (lines 717, 759)
-- `00_create_task_assignments.py` (now uses marker-based detection)
+- `00_create_level_4_task_assignments.py` (now uses marker-based detection)
 - `05_run_basin_tc_risk.py` (task reading logic)
 
 ### 2. **Task Assignment Structure Overhaul** ✅
@@ -73,7 +73,7 @@ task_id,model,variant,scenario,time_period,basin,draw
 - Tasks group up to 25 draws per combination
 - File has ~500K rows for 21,338 tasks
 
-**Changes to `00_create_task_assignments.py`:**
+**Changes to `00_create_level_4_task_assignments.py`:**
 - Iterates through each `draw_status.csv` file individually
 - Extracts full path components (model/variant/scenario/time_period/basin)
 - Reads completion markers (not CSV) to find incomplete draws
@@ -82,7 +82,7 @@ task_id,model,variant,scenario,time_period,basin,draw
 
 **Changes to `05_run_basin_tc_risk.py`:**
 - **Task-based mode:** Accepts `--task_id` parameter
-- Reads `task_assignments.csv` and filters by task_id
+- Reads `level_4_task_assignments.csv` and filters by task_id
 - Groups rows by combination (should be only 1 per task)
 - Extracts explicit draw list: `[28, 36, 38, 63, 65, ...]`
 - Added `draws_list` parameter to `process_single_combination()` and `validate_batch_output()`
@@ -92,7 +92,7 @@ task_id,model,variant,scenario,time_period,basin,draw
 **How it works:**
 1. TC-risk validates each draw after processing
 2. Creates atomic `.draw_####.complete` marker file (0 bytes, 775 permissions)
-3. `00_create_task_assignments.py` uses `get_completed_draws_from_markers()` to identify complete draws
+3. `00_create_level_4_task_assignments.py` uses `get_completed_draws_from_markers()` to identify complete draws
 4. Task assignments only include draws WITHOUT markers
 
 **Race Condition Prevention:**
@@ -145,7 +145,7 @@ runtime_hours = min(int(np.ceil(runtime_minutes / 60)), 6)
 - Cleans up orphaned Zarr files
 - Outputs: `draw_status.csv` + completion markers
 
-#### `00_create_task_assignments.py`
+#### `00_create_level_4_task_assignments.py`
 **Purpose:** Create task distribution by reading completion markers across all combinations.
 - Called once after all draw status files created
 - Scans all `draw_status.csv` files in tree
@@ -153,7 +153,7 @@ runtime_hours = min(int(np.ceil(runtime_minutes / 60)), 6)
   - Reads completion markers to identify incomplete draws
   - Batches incomplete draws into groups of 25
   - Creates one CSV row per draw with full context
-- Output: `task_assignments.csv` (one row per incomplete draw)
+- Output: `level_4_task_assignments.csv` (one row per incomplete draw)
 - Uses: `get_completed_draws_from_markers()` from `zarr_functions.py`
 
 ### Level 4 Executor
@@ -166,7 +166,7 @@ runtime_hours = min(int(np.ceil(runtime_minutes / 60)), 6)
 ```bash
 python 05_run_basin_tc_risk.py --task_id 123 --total_memory 8G --data_source cmip6
 ```
-- Reads `task_assignments.csv`
+- Reads `level_4_task_assignments.csv`
 - Filters to rows matching task_id
 - Groups by combination (validates only 1 combination per task)
 - Extracts explicit draw list
@@ -202,7 +202,7 @@ python 05_run_basin_tc_risk.py \
 2. Create task assignment task (depends on all status files)
 
 **Level 4 workflow:**
-1. Reads `task_assignments.csv` to get total task count
+1. Reads `level_4_task_assignments.csv` to get total task count
 2. Creates one Jobmon task per task_id
 3. Each task calls: `05_run_basin_tc_risk.py --task_id <id> --total_memory 8G`
 
@@ -241,7 +241,7 @@ python 05_run_basin_tc_risk.py --task_id 123 --total_memory 20G
 
 **Re-ran task assignment creation:**
 ```bash
-python 00_create_task_assignments.py --data_source cmip6 --draws_per_batch 25
+python 00_create_level_4_task_assignments.py --data_source cmip6 --draws_per_batch 25
 ```
 - ✅ Draw 249 excluded from new assignments
 - ✅ Task count decreased: 21,339 → 21,338
@@ -263,7 +263,7 @@ df = pd.read_csv(file_path, keep_default_na=False)
 **Files requiring this:**
 - `00_orchestrator.py`
 - `orchestrator_utils.py`
-- `00_create_task_assignments.py`
+- `00_create_level_4_task_assignments.py`
 - `05_run_basin_tc_risk.py`
 - Any script that reads basin codes from CSV
 
@@ -367,7 +367,7 @@ All output files use **775 permissions** for team collaboration:
 ```
 CLIMADA_INPUT_PATH/
 └── cmip6/
-    ├── task_assignments.csv          # Task distribution
+    ├── level_4_task_assignments.csv          # Task distribution
     └── {model}/
         └── {variant}/
             └── {scenario}/
@@ -408,7 +408,7 @@ Seven ocean basins tracked:
 
 ### Prerequisites
 1. Level 0-3 completed (or running Level 4 independently)
-2. `task_assignments.csv` exists with current state
+2. `level_4_task_assignments.csv` exists with current state
 3. Time bins CSV available at: `/mnt/team/rapidresponse/pub/tropical-storms/tempestextremes/outputs/cmip6/bayespoisson_time_bins_wide_max_bin_5.csv`
 
 ### To Run Full Level 4
@@ -430,7 +430,7 @@ python 00_orchestrator.py  # With STARTING_LEVEL=0, ENDING_LEVEL=0
 # Then check the task count
 python -c "
 import pandas as pd
-df = pd.read_csv('/mnt/team/rapidresponse/pub/tropical-storms/climada/input/cmip6/task_assignments.csv', keep_default_na=False)
+df = pd.read_csv('/mnt/team/rapidresponse/pub/tropical-storms/climada/input/cmip6/level_4_task_assignments.csv', keep_default_na=False)
 print(f'Tasks: {df[\"task_id\"].nunique()}')
 print(f'Draws: {len(df)}')
 "
@@ -443,7 +443,7 @@ cd /ihme/homes/bcreiner/repos/idd-climate-models/src/idd_climate_models/01_proce
 # Find a task with few draws
 python -c "
 import pandas as pd
-df = pd.read_csv('/mnt/team/rapidresponse/pub/tropical-storms/climada/input/cmip6/task_assignments.csv', keep_default_na=False)
+df = pd.read_csv('/mnt/team/rapidresponse/pub/tropical-storms/climada/input/cmip6/level_4_task_assignments.csv', keep_default_na=False)
 sizes = df.groupby('task_id').size()
 min_task = sizes.idxmin()
 print(f'Smallest task: {min_task} ({sizes.min()} draws)')
@@ -470,12 +470,12 @@ cat /mnt/team/rapidresponse/pub/tropical-storms/climada/input/cmip6/CMCC-ESM2/r1
 ### Verify task assignments
 ```bash
 # Check specific combination
-grep "CMCC-ESM2,r1i1p1f1,ssp126,2020-2024,NI" /mnt/team/rapidresponse/pub/tropical-storms/climada/input/cmip6/task_assignments.csv
+grep "CMCC-ESM2,r1i1p1f1,ssp126,2020-2024,NI" /mnt/team/rapidresponse/pub/tropical-storms/climada/input/cmip6/level_4_task_assignments.csv
 
 # Count tasks by size
 python -c "
 import pandas as pd
-df = pd.read_csv('/mnt/team/rapidresponse/pub/tropical-storms/climada/input/cmip6/task_assignments.csv', keep_default_na=False)
+df = pd.read_csv('/mnt/team/rapidresponse/pub/tropical-storms/climada/input/cmip6/level_4_task_assignments.csv', keep_default_na=False)
 print(df.groupby('task_id').size().value_counts().sort_index())
 "
 ```
@@ -515,7 +515,7 @@ Nothing critical - system is ready to run Level 4!
 # Verify task assignments exist and have correct structure
 python -c "
 import pandas as pd
-df = pd.read_csv('/mnt/team/rapidresponse/pub/tropical-storms/climada/input/cmip6/task_assignments.csv', keep_default_na=False)
+df = pd.read_csv('/mnt/team/rapidresponse/pub/tropical-storms/climada/input/cmip6/level_4_task_assignments.csv', keep_default_na=False)
 print(f'Columns: {list(df.columns)}')
 print(f'Tasks: {df[\"task_id\"].nunique()}')
 print(f'Draws: {len(df)}')

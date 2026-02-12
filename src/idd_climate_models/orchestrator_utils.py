@@ -508,7 +508,7 @@ def read_draw_status(
         climada_input_path: Base path to CLIMADA inputs
     
     Returns:
-        DataFrame with 'draw', 'netcdf_complete', and 'zarr_complete' columns, or None if file doesn't exist
+        DataFrame with 'draw' and 'complete' columns, or None if file doesn't exist
     """
     status_file = get_draw_status_file_path(
         model, variant, scenario, time_period, basin, climada_input_path
@@ -519,7 +519,7 @@ def read_draw_status(
     
     try:
         df = pd.read_csv(status_file)
-        if 'draw' not in df.columns or 'netcdf_complete' not in df.columns or 'zarr_complete' not in df.columns:
+        if 'draw' not in df.columns or 'complete' not in df.columns:
             print(f"Warning: Invalid draw status file format: {status_file}")
             return None
         return df
@@ -548,7 +548,7 @@ def get_incomplete_draws(
         climada_input_path: Base path to CLIMADA inputs
     
     Returns:
-        List of draw numbers that are incomplete (either netcdf_complete == 0 or zarr_complete == 0)
+        List of draw numbers that are incomplete (complete == 0)
     """
     df = read_draw_status(
         model, variant, scenario, time_period, basin, climada_input_path
@@ -559,8 +559,8 @@ def get_incomplete_draws(
         import idd_climate_models.constants as rfc
         return list(range(rfc.NUM_DRAWS))
     
-    # Draw is incomplete if either NetCDF or Zarr is missing/invalid
-    incomplete_mask = (df['netcdf_complete'] == 0) | (df['zarr_complete'] == 0)
+    # Draw is incomplete if netCDF is missing
+    incomplete_mask = (df['complete'] == 0)
     incomplete = df[incomplete_mask]['draw'].tolist()
     return incomplete
 
@@ -572,8 +572,7 @@ def update_draw_status(
     time_period: str,
     basin: str,
     draw_number: int,
-    netcdf_complete: bool,
-    zarr_complete: bool,
+    complete: bool,
     climada_input_path: Path
 ) -> None:
     """
@@ -586,8 +585,7 @@ def update_draw_status(
         time_period: Time period string
         basin: Basin code
         draw_number: Draw number to update
-        netcdf_complete: True if NetCDF is complete, False otherwise
-        zarr_complete: True if Zarr is complete, False otherwise
+        complete: True if netCDF is complete, False otherwise
         climada_input_path: Base path to CLIMADA inputs
     """
     import filelock
@@ -610,13 +608,11 @@ def update_draw_status(
                 import idd_climate_models.constants as rfc
                 df = pd.DataFrame({
                     'draw': range(rfc.NUM_DRAWS),
-                    'netcdf_complete': [0] * rfc.NUM_DRAWS,
-                    'zarr_complete': [0] * rfc.NUM_DRAWS
+                    'complete': [0] * rfc.NUM_DRAWS
                 })
             
             # Update the specific draw
-            df.loc[df['draw'] == draw_number, 'netcdf_complete'] = 1 if netcdf_complete else 0
-            df.loc[df['draw'] == draw_number, 'zarr_complete'] = 1 if zarr_complete else 0
+            df.loc[df['draw'] == draw_number, 'complete'] = 1 if complete else 0
             
             # Write back
             df.to_csv(status_file, index=False)
@@ -659,7 +655,7 @@ def check_draw_status_file_exists(
 # TASK ASSIGNMENT FUNCTIONS
 # ============================================================================
 
-def get_task_assignments_file_path(
+def get_level_4_task_assignments_file_path(
     model: str,
     variant: str,
     scenario: str,
@@ -677,10 +673,10 @@ def get_task_assignments_file_path(
         climada_input_path: Base path to CLIMADA inputs
     
     Returns:
-        Path to task_assignments.csv file
+        Path to level_4_task_assignments.csv file
     """
     assignments_dir = climada_input_path / model / variant / scenario / time_period
-    return assignments_dir / "task_assignments.csv"
+    return assignments_dir / "level_4_task_assignments.csv"
 
 
 def read_task_assignment(
@@ -705,7 +701,7 @@ def read_task_assignment(
     Returns:
         DataFrame with 'task_id', 'basin', 'draw' columns for this task, or None if not found
     """
-    assignments_file = get_task_assignments_file_path(
+    assignments_file = get_level_4_task_assignments_file_path(
         model, variant, scenario, time_period, climada_input_path
     )
     
@@ -742,7 +738,7 @@ def get_total_tasks_from_assignments(
     """
     from pathlib import Path
     
-    assignments_file = Path(data_source_path) / "task_assignments.csv"
+    assignments_file = Path(data_source_path) / "level_4_task_assignments.csv"
     
     if not assignments_file.exists():
         return 0

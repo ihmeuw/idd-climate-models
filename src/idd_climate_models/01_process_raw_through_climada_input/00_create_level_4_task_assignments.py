@@ -2,7 +2,7 @@
 Create task assignments file from draw status files.
 
 This script reads all draw_status.csv files under the data source directory
-and creates a task_assignments.csv file that distributes incomplete draws evenly across tasks.
+and creates a level_4_task_assignments.csv file that distributes incomplete draws evenly across tasks.
 
 Can operate in two modes:
 1. Smart mode (default): Read status files and only assign incomplete draws
@@ -10,12 +10,12 @@ Can operate in two modes:
 
 Usage:
     # Smart mode (only run incomplete draws)
-    python 00_create_task_assignments.py \\
+    python 00_create_level_4_task_assignments.py \\
         --data_source cmip6 \\
         --draws_per_batch 25
     
     # Full run mode (run all draws uniformly)
-    python 00_create_task_assignments.py \\
+    python 00_create_level_4_task_assignments.py \\
         --data_source cmip6 \\
         --draws_per_batch 25 \\
         --full_run
@@ -29,9 +29,10 @@ from collections import defaultdict
 
 import idd_climate_models.constants as rfc
 import idd_climate_models.orchestrator_utils as utils
+from idd_climate_models.time_period_functions import get_time_bins_path
 
 
-def create_task_assignments_from_status_files(data_source, draws_per_batch):
+def create_level_4_task_assignments_from_status_files(data_source, draws_per_batch, max_period_duration=None):
     """
     Create task assignments per (model, variant, scenario, time_period, basin) combination.
     
@@ -41,9 +42,12 @@ def create_task_assignments_from_status_files(data_source, draws_per_batch):
     - Split into batches of draws_per_batch
     - Create one task per batch
     
+    Only processes combinations that exist in the time_bins file (same validation as orchestrator).
+    
     Args:
         data_source: Data source (e.g., 'cmip6')
         draws_per_batch: Target number of draws per task
+        max_period_duration: Maximum time period duration in years (None = use original bins)
     
     Returns:
         tuple: (assignments_file_path, total_tasks_needed)
@@ -57,15 +61,59 @@ def create_task_assignments_from_status_files(data_source, draws_per_batch):
     print(f"  Target draws per batch: {draws_per_batch}")
     print(f"{'='*80}")
     
-    # Find all draw_status.csv files
-    status_files = list(climada_base.glob("*/*/*/*/*/draw_status.csv"))
+    # Load time bins to determine valid combinations (same logic as orchestrator)
+    print(f"\nLoading time bins to validate combinations...")
+    print(f"  MAX_PERIOD_DURATION: {max_period_duration}")
+    time_bins_path = get_time_bins_path(max_period_duration)
+    time_bins_df = pd.read_csv(time_bins_path)
     
-    if not status_files:
+    # Create set of valid (model, variant, scenario, time_period) combinations from time bins
+    time_bins_df['time_period'] = time_bins_df['start_year'].astype(str) + '-' + time_bins_df['end_year'].astype(str)
+    valid_combinations = set()
+    for _, row in time_bins_df.iterrows():
+        valid_combinations.add((row['model'], row['variant'], row['scenario'], row['time_period']))
+    
+    print(f"Found {len(valid_combinations)} valid combinations in time bins")
+    
+    # Find all draw_status.csv files, filtering out invalid combinations
+    all_status_files = list(climada_base.glob("*/*/*/*/*/draw_status.csv"))
+    
+    if not all_status_files:
         print(f"\n⚠️  No status files found - cannot create smart assignments")
         print(f"Run with --full_run to create uniform 'run all' assignments")
         sys.exit(1)
     
-    print(f"\nFound {len(status_files)} status files")
+    print(f"Found {len(all_status_files)} total status files, filtering to valid combinations...")
+    
+    # Filter to valid combinations only
+    status_files = []
+    for status_file in all_status_files:
+        # Skip paths with _DELETE_
+        if '_DELETE_' in str(status_file):
+            continue
+        
+        # Extract combination from path
+        parts = status_file.parts
+        try:
+            data_source_idx = parts.index(data_source)
+            model = parts[data_source_idx + 1]
+            variant = parts[data_source_idx + 2]
+            scenario = parts[data_source_idx + 3]
+            time_period = parts[data_source_idx + 4]
+            
+            # Check if combination is valid
+            if (model, variant, scenario, time_period) in valid_combinations:
+                status_files.append(status_file)
+        except (ValueError, IndexError):
+            # Path doesn't match expected structure, skip
+            continue
+    
+    if not status_files:
+        print(f"\n⚠️  No valid status files found after filtering")
+        print(f"     (All {len(all_status_files)} files were either deleted or not in time bins)")
+        sys.exit(1)
+    
+    print(f"Filtered to {len(status_files)} valid status files")
     print(f"Processing each combination...\n")
     
     # Collect task information per combination
@@ -94,9 +142,15 @@ def create_task_assignments_from_status_files(data_source, draws_per_batch):
         df = pd.read_csv(status_file, keep_default_na=False)
         all_draws = set(df['draw'].tolist())
         
-        # Get completed draws from .draw_####.complete marker files
-        from idd_climate_models.zarr_functions import get_completed_draws_from_markers
-        completed_draws = get_completed_draws_from_markers(combination_path)
+        # Get completed draws from .nc_draw_####.complete marker files
+        marker_files = list(combination_path.glob(".nc_draw_*.complete"))
+        completed_draws = set()
+        for marker_file in marker_files:
+            try:
+                draw_num = int(marker_file.stem.split('_')[-1])
+                completed_draws.add(draw_num)
+            except (IndexError, ValueError):
+                continue
         
         # Find incomplete draws (those without completion markers)
         incomplete_draws = sorted(all_draws - completed_draws)
@@ -158,7 +212,7 @@ def create_task_assignments_from_status_files(data_source, draws_per_batch):
     
     # Create DataFrame and save
     df = pd.DataFrame(assignments)
-    output_file = climada_base / "task_assignments.csv"
+    output_file = climada_base / "level_4_task_assignments.csv"
     df.to_csv(output_file, index=False)
     
     print(f"\nTask assignments saved to:")
@@ -228,7 +282,7 @@ def create_full_run_assignments(data_source, draws_per_batch):
     # Create DataFrame and save
     df = pd.DataFrame(assignments)
     climada_base.mkdir(parents=True, exist_ok=True)
-    output_file = climada_base / "task_assignments.csv"
+    output_file = climada_base / "level_4_task_assignments.csv"
     df.to_csv(output_file, index=False)
     
     print(f"\n{'='*80}")
@@ -248,18 +302,26 @@ def main():
         epilog="""
 Examples:
   # Smart mode (only incomplete draws)
-  python 00_create_task_assignments.py --data_source cmip6 --draws_per_batch 25
+  python 00_create_level_4_task_assignments.py --data_source cmip6 --draws_per_batch 25
   
   # Full run mode (all draws uniformly)
-  python 00_create_task_assignments.py --data_source cmip6 --draws_per_batch 25 --full_run
+  python 00_create_level_4_task_assignments.py --data_source cmip6 --draws_per_batch 25 --full_run
         """
     )
     parser.add_argument('--data_source', required=True, help='Data source (e.g., cmip6)')
     parser.add_argument('--draws_per_batch', type=int, default=25, help='Target draws per task (default: 25)')
+    parser.add_argument('--max_period_duration', type=str, default=None, 
+                       help='Maximum time period duration in years (None = use original bins, must match orchestrator)')
     parser.add_argument('--full_run', action='store_true', 
                        help='Create uniform assignments for ALL draws (ignore status files)')
     
     args = parser.parse_args()
+    
+    # Convert max_period_duration: "None" string -> None, "5" -> 5
+    if args.max_period_duration is None or args.max_period_duration == "None":
+        max_period_duration = None
+    else:
+        max_period_duration = int(args.max_period_duration)
     
     try:
         if args.full_run:
@@ -267,8 +329,8 @@ Examples:
                 args.data_source, args.draws_per_batch
             )
         else:
-            assignments_file, num_tasks = create_task_assignments_from_status_files(
-                args.data_source, args.draws_per_batch
+            assignments_file, num_tasks = create_level_4_task_assignments_from_status_files(
+                args.data_source, args.draws_per_batch, max_period_duration
             )
         
         print(f"✅ Successfully created task assignments")

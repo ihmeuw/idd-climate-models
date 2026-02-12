@@ -1,6 +1,6 @@
 # Task-Based Level 4 Workflow
 
-The orchestrator now uses **task-based Level 4 execution** exclusively. Level 4 tasks read from `task_assignments.csv` which maps task IDs to basin/draw combinations.
+The orchestrator now uses **task-based Level 4 execution** exclusively. Level 4 tasks read from `level_4_task_assignments.csv` which maps task IDs to basin/draw combinations.
 
 ## Two Workflow Options
 
@@ -20,7 +20,7 @@ The orchestrator now uses **task-based Level 4 execution** exclusively. Level 4 
    
    This creates:
    - `draw_status.csv` for each basin (validates NetCDF + Zarr, auto-deletes corrupted files)
-   - `task_assignments.csv` with only incomplete draws distributed evenly
+   - `level_4_task_assignments.csv` with only incomplete draws distributed evenly
 
 2. **Run orchestrator with Level 3-4** to execute basin TC-risk:
    ```bash
@@ -46,7 +46,7 @@ The orchestrator now uses **task-based Level 4 execution** exclusively. Level 4 
 
 1. **Manually create task assignments** for all draws:
    ```bash
-   python 00_create_task_assignments.py \
+   python 00_create_level_4_task_assignments.py \
        --data_source cmip6 \
        --draws_per_batch 25 \
        --full_run
@@ -69,7 +69,7 @@ The orchestrator now uses **task-based Level 4 execution** exclusively. Level 4 
 
 ## Task Assignment File Structure
 
-`task_assignments.csv` contains three columns:
+`level_4_task_assignments.csv` contains three columns:
 ```csv
 task_id,basin,draw
 1,EP,0
@@ -109,7 +109,7 @@ python 05_run_basin_tc_risk.py \
     --task_id 1
 ```
 
-The script reads `task_assignments.csv` to determine which basin/draw combinations to process.
+The script reads `level_4_task_assignments.csv` to determine which basin/draw combinations to process.
 
 ---
 
@@ -124,7 +124,7 @@ Key parameters in the orchestrator:
 
 Task assignments are stored at:
 ```
-{CLIMADA_INPUT_PATH}/{data_source}/task_assignments.csv
+{CLIMADA_INPUT_PATH}/{data_source}/level_4_task_assignments.csv
 ```
 
 Status files are stored at:

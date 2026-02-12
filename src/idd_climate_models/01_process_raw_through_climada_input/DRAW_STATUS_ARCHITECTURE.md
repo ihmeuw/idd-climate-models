@@ -12,11 +12,11 @@ This implements a robust, resumable system for running basin TC-risk draws using
 - **Format**: CSV with columns `draw` (0-249) and `complete` (0 or 1)
 - **Created by**: `00_create_draw_status.file.py` (Level 0-A in orchestrator)
 
-### 2. Task Assignments File (`task_assignments.csv`)
-- **Location**: `CLIMADA_INPUT_PATH/{model}/{variant}/{scenario}/{time_period}/task_assignments.csv`
+### 2. Task Assignments File (`level_4_task_assignments.csv`)
+- **Location**: `CLIMADA_INPUT_PATH/{model}/{variant}/{scenario}/{time_period}/level_4_task_assignments.csv`
 - **Format**: CSV with columns `task_id`, `basin`, `draw`
 - **Purpose**: Maps each task_id to specific draws it should run, distributing incomplete draws evenly
-- **Created by**: `00_create_task_assignments.py` (Level 0-B in orchestrator)
+- **Created by**: `00_create_level_4_task_assignments.py` (Level 0-B in orchestrator)
 
 ## Workflow
 
@@ -42,7 +42,7 @@ python 00_create_draw_status_file.py \
 ### Level 0-B: Create Task Assignments (Single Task)
 ```bash
 # Reads all draw_status.csv files and creates task assignments
-python 00_create_task_assignments.py \
+python 00_create_level_4_task_assignments.py \
     --data_source cmip6 \
     --model EC-Earth3 \
     --variant r1i1p1f1 \
@@ -57,7 +57,7 @@ python 00_create_task_assignments.py \
 - Collects all incomplete draws (where `complete == 0`)
 - Distributes them evenly across tasks (~25 draws per task)
 - **Crucially**: Assigns specific draws to each task_id (not ranges!)
-- Creates `task_assignments.csv`
+- Creates `level_4_task_assignments.csv`
 
 **Example output:**
 ```csv
@@ -88,7 +88,7 @@ python 05_run_basin_tc_risk.py \
 ```
 
 **What it does:**
-1. Reads `task_assignments.csv` for its task_id
+1. Reads `level_4_task_assignments.csv` for its task_id
 2. Gets list of draws to run (e.g., [13, 47, 102, ...])
 3. For each draw in that list:
    - Checks `draw_status.csv` - skip if already complete
@@ -149,7 +149,7 @@ for mvst in unique_mvsts:
     # Depends on ALL status tasks for this time_period
     
 # Level 4: Read task assignments and submit only needed tasks
-assignments_df = pd.read_csv(task_assignments_file)
+assignments_df = pd.read_csv(level_4_task_assignments_file)
 for task_id in assignments_df['task_id'].unique():
     basin_task = basin_template.create_task(
         model=model,
@@ -169,7 +169,7 @@ CLIMADA_INPUT_PATH/cmip6/
     └── r1i1p1f1/
         └── historical/
             └── 1970-1974/
-                ├── task_assignments.csv          # Level 0-B output
+                ├── level_4_task_assignments.csv          # Level 0-B output
                 ├── SP/
                 │   ├── draw_status.csv          # Level 0-A output
                 │   ├── draw_status.lock         # File lock
@@ -196,9 +196,9 @@ Test with a single basin first:
 python 00_create_draw_status_file.py --data_source cmip6 --model EC-Earth3 --variant r1i1p1f1 --scenario historical --time_period 1970-1974 --basin SP
 
 # 2. Create task assignments
-python 00_create_task_assignments.py --data_source cmip6 --model EC-Earth3 --variant r1i1p1f1 --scenario historical --time_period 1970-1974 --basins SP --draws_per_batch 25
+python 00_create_level_4_task_assignments.py --data_source cmip6 --model EC-Earth3 --variant r1i1p1f1 --scenario historical --time_period 1970-1974 --basins SP --draws_per_batch 25
 
 # 3. Check the files
 cat /mnt/team/rapidresponse/pub/tropical-storms/climada/input/cmip6/EC-Earth3/r1i1p1f1/historical/1970-1974/SP/draw_status.csv
-cat /mnt/team/rapidresponse/pub/tropical-storms/climada/input/cmip6/EC-Earth3/r1i1p1f1/historical/1970-1974/task_assignments.csv
+cat /mnt/team/rapidresponse/pub/tropical-storms/climada/input/cmip6/EC-Earth3/r1i1p1f1/historical/1970-1974/level_4_task_assignments.csv
 ```

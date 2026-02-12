@@ -2,7 +2,7 @@
 Run TC-risk downscaling for a specific basin with draw batching.
 
 This script can operate in two modes:
-1. Task-based mode: --task_id (reads task_assignments.csv)
+1. Task-based mode: --task_id (reads level_4_task_assignments.csv)
 2. Direct mode: --model --variant --scenario --time_period --basin --draw_start --draw_end
 """
 
@@ -16,7 +16,7 @@ from idd_climate_models.tc_risk_functions import (
     create_tc_risk_config_dict,
     execute_tc_risk_with_config
 )
-from idd_climate_models.zarr_functions import validate_single_draw
+
 
 
 def get_draw_suffix(draw_num):
@@ -38,84 +38,57 @@ def get_existing_draw_numbers(data_source, model, variant, scenario, time_period
                               draw_start, draw_end):
     """
     Check which draw numbers already exist within the specified range.
-    Reads completion marker files (.draw_####.complete) created after successful validation.
+    Reads completion marker files (.nc_draw_####.complete) first, then falls back to checking actual netCDF files.
     
     Args:
         draw_start: Starting draw number (0-249, inclusive)
         draw_end: Ending draw number (0-249, inclusive)
     
     Returns:
-        set: Set of draw numbers (within range) that have completed and validated files
+        set: Set of draw numbers (within range) that have completed files
     """
-    from idd_climate_models.zarr_functions import get_completed_draws_from_markers
-    
-    # Path to CLIMADA input (where markers live)
+    # Path to CLIMADA input (where markers and netCDF files live)
     climada_input = rfc.CLIMADA_INPUT_PATH / data_source / model / variant / scenario / time_period / basin
     
-    # Read completion markers
-    all_completed = get_completed_draws_from_markers(climada_input)
+    if not climada_input.exists():
+        return set()
     
-    # Filter to requested range
-    existing_draws = set(d for d in all_completed if draw_start <= d <= draw_end)
+    # Strategy 1: Read completion markers (fast) - .nc_draw_*.complete format
+    marker_files = list(climada_input.glob(".nc_draw_*.complete"))
+    completed_from_markers = set()
+    for marker_file in marker_files:
+        try:
+            # Extract draw number from .nc_draw_0123.complete
+            draw_num = int(marker_file.stem.split('_')[-1])
+            if draw_start <= draw_num <= draw_end:
+                completed_from_markers.add(draw_num)
+        except (IndexError, ValueError):
+            continue
     
-    return existing_draws
-
-
-def validate_batch_output(data_source, model, variant, scenario, time_period, basin, 
-                         expected_start, expected_end, draws_list=None):
-    """
-    Validate that the batch produced the expected draws with correct storm counts.
-    Uses validate_single_draw to perform 3-layer validation on each draw.
-    
-    Args:
-        draws_list: Optional list of specific draws to validate. If None, validates all draws in [expected_start, expected_end]
-    
-    Returns:
-        tuple: (success: bool, error_message: str or None)
-    """
-    import time
-    
-    # Wait a moment for filesystem to sync
-    time.sleep(2)
-    
-    output_path = rfc.CLIMADA_INPUT_PATH / data_source / model / variant / scenario / time_period / basin
-    tc_risk_output_path = rfc.TC_RISK_OUTPUT_PATH / data_source / model / variant / scenario / time_period / basin
-    
+    # Strategy 2: Check for actual netCDF files (fallback for old runs without markers)
     time_parts = time_period.split('-')
     time_start_str = f'{int(time_parts[0]):04d}01'
     time_end_str = f'{int(time_parts[1]):04d}12'
     base_pattern = f'tracks_{basin}_{model}_{scenario}_{variant}_{time_start_str}_{time_end_str}'
     
-    validation_errors = []
+    nc_files = list(climada_input.glob(f"{base_pattern}*.nc"))
+    completed_from_files = set()
+    for nc_file in nc_files:
+        # Parse draw number from filename
+        if nc_file.stem == base_pattern:
+            completed_from_files.add(0)  # Draw 0 (no suffix)
+        elif '_e' in nc_file.stem:
+            try:
+                suffix = nc_file.stem.split('_e')[-1]
+                draw_num = int(suffix) + 1
+                if draw_start <= draw_num <= draw_end:
+                    completed_from_files.add(draw_num)
+            except ValueError:
+                continue
     
-    # Determine which draws to validate
-    if draws_list is not None:
-        draws_to_validate = draws_list
-    else:
-        draws_to_validate = range(expected_start, expected_end + 1)
-    
-    # Check each draw individually
-    for draw_num in draws_to_validate:
-        suffix = get_draw_suffix(draw_num)
-        zarr_file = output_path / f'{base_pattern}{suffix}.zarr'
-        nc_file = tc_risk_output_path / f'{base_pattern}{suffix}.nc'
-        
-        # Use FULL validation (with spot-check) for fresh output
-        # Do NOT delete on failure - this is validation only
-        success, error = validate_single_draw(
-            nc_file, zarr_file,
-            spot_check=True,
-            delete_on_failure=False
-        )
-        
-        if not success:
-            validation_errors.append(f"Draw {draw_num}: {error}")
-    
-    if validation_errors:
-        error_msg = "; ".join(validation_errors)
-        return False, error_msg
-    
-    return True, None
+    # Return union of both strategies
+    return completed_from_markers | completed_from_files
+
 
 
 def process_single_combination(data_source, model, variant, scenario, time_period, basin, 
@@ -275,7 +248,7 @@ def main():
     
     # Task-based mode
     parser.add_argument('--task_id', type=int, required=False,
-                        help='Task ID to process (reads from task_assignments.csv)')
+                        help='Task ID to process (reads from level_4_task_assignments.csv)')
     
     # Direct mode (all required if not using task_id)
     parser.add_argument('--model', type=str, required=False)
@@ -298,15 +271,15 @@ def main():
         print("=" * 80)
         
         # Read task assignments
-        task_assignments_path = rfc.CLIMADA_INPUT_PATH / args.data_source / "task_assignments.csv"
+        level_4_task_assignments_path = rfc.CLIMADA_INPUT_PATH / args.data_source / "level_4_task_assignments.csv"
         
-        if not task_assignments_path.exists():
-            print(f"\n❌ ERROR: Task assignments file not found: {task_assignments_path}")
+        if not level_4_task_assignments_path.exists():
+            print(f"\n❌ ERROR: Task assignments file not found: {level_4_task_assignments_path}")
             print("Run Level 0 of the orchestrator to create task assignments.")
             sys.exit(1)
         
-        print(f"\nReading task assignments from: {task_assignments_path}")
-        df_assignments = pd.read_csv(task_assignments_path, keep_default_na=False)
+        print(f"\nReading task assignments from: {level_4_task_assignments_path}")
+        df_assignments = pd.read_csv(level_4_task_assignments_path, keep_default_na=False)
         
         # Get ALL rows for this task (one row per draw)
         task_df = df_assignments[df_assignments['task_id'] == args.task_id]

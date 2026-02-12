@@ -1,0 +1,7 @@
+usage: 05_run_basin_tc_risk.py [-h] [--data_source DATA_SOURCE] --total_memory
+                               TOTAL_MEMORY [--task_id TASK_ID]
+                               [--model MODEL] [--variant VARIANT]
+                               [--scenario SCENARIO]
+                               [--time_period TIME_PERIOD] [--basin BASIN]
+                               [--draw_start DRAW_START] [--draw_end DRAW_END]
+05_run_basin_tc_risk.py: error: the following arguments are required: --total_memory

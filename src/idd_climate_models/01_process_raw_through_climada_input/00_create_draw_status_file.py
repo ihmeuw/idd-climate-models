@@ -21,11 +21,6 @@ import pandas as pd
 import shutil
 
 import idd_climate_models.constants as rfc
-from idd_climate_models.zarr_functions import (
-    validate_single_draw,
-    create_draw_completion_marker,
-    get_completed_draws_from_markers
-)
 
 
 def extract_draw_number(filename):
@@ -51,14 +46,13 @@ def extract_draw_number(filename):
 
 def create_draw_status_file(data_source, model, variant, scenario, time_period, basin, spot_check=False):
     """
-    Create a draw status CSV file by validating existing outputs.
-    Status file lives in CLIMADA input folder since draw is only complete when zarr exists.
+    Create a draw status CSV file by checking for netCDF files and completion markers.
+    Status file lives in CLIMADA input folder.
     
     Returns:
         tuple: (status_file_path, num_complete, num_incomplete)
     """
     # Setup paths
-    tc_risk_output = rfc.TC_RISK_OUTPUT_PATH / data_source / model / variant / scenario / time_period / basin
     climada_input = rfc.CLIMADA_INPUT_PATH / data_source / model / variant / scenario / time_period / basin
     
     # Status file lives in CLIMADA input folder
@@ -72,95 +66,73 @@ def create_draw_status_file(data_source, model, variant, scenario, time_period, 
     print(f"  Basin: {basin}")
     print(f"{'='*80}")
     
-    # Initialize all draws as incomplete: {draw_num: (netcdf_valid, zarr_valid)}
-    draw_status = {draw: (0, 0) for draw in range(rfc.NUM_DRAWS)}
+    # Initialize all draws as incomplete
+    draw_status = {draw: 0 for draw in range(rfc.NUM_DRAWS)}
     
-    # First, check for existing completion markers (fast check)
-    existing_markers = get_completed_draws_from_markers(climada_input)
-    if existing_markers:
-        print(f"\nFound {len(existing_markers)} completion markers (skipping validation)")
-        for draw_num in existing_markers:
+    # Check for existing completion markers (.nc_draw_*.complete)
+    marker_files = list(climada_input.glob(".nc_draw_*.complete"))
+    existing_markers = set()
+    for marker_file in marker_files:
+        try:
+            draw_num = int(marker_file.stem.split('_')[-1])
             if draw_num < rfc.NUM_DRAWS:
-                draw_status[draw_num] = (1, 1)
+                existing_markers.add(draw_num)
+                draw_status[draw_num] = 1
+        except (IndexError, ValueError):
+            continue
     
-    # Check which draws have valid output files
-    processed_zarr_files = set()  # Track which zarrs we've already checked
-    if tc_risk_output.exists():
-        print(f"\nValidating files in TC_RISK_OUTPUT and CLIMADA_INPUT...")
-        nc_files = list(tc_risk_output.glob("tracks_*.nc"))
-        print(f"  Found {len(nc_files)} NetCDF files")
-        
-        for nc_file in nc_files:
-            draw_num = extract_draw_number(nc_file)
-            if draw_num is None or draw_num >= rfc.NUM_DRAWS:
-                continue
-            
-            # Skip if already marked complete (saves time)
-            if draw_num in existing_markers:
-                continue
-            
-            zarr_file = climada_input / nc_file.with_suffix('.zarr').name
-            processed_zarr_files.add(zarr_file)  # Track this zarr
-            
-            # Validate using shared function
-            success, error = validate_single_draw(
-                nc_file, zarr_file, 
-                spot_check=spot_check, 
-                delete_on_failure=True
-            )
-            
-            if error == "Zarr file missing":
-                print(f"  ⚠️  Draw {draw_num:3d}: NetCDF exists, Zarr missing")
-                draw_status[draw_num] = (1, 0)
-            elif success:
-                print(f"  ✓ Draw {draw_num:3d}: Both valid (verified)")
-                draw_status[draw_num] = (1, 1)
-                # Create completion marker
-                create_draw_completion_marker(climada_input, draw_num)
-            else:
-                print(f"  ✗ Draw {draw_num:3d}: {error}")
-                draw_status[draw_num] = (0, 0)
-                if error not in ["NetCDF file missing", "Zarr file missing"]:
-                    print(f"    Deleted both files")
+    if existing_markers:
+        print(f"\nFound {len(existing_markers)} completion markers")
+        for draw_num in sorted(existing_markers):
+            print(f"  ✓ Draw {draw_num:3d}: Complete (has marker)")
     
-    # Clean up orphaned Zarr files (Zarr exists but NC is missing)
-    # Only check zarrs we haven't already processed
+    # Check for netCDF files without markers (for backwards compatibility)
     if climada_input.exists():
-        zarr_files = list(climada_input.glob("tracks_*.zarr"))
-        for zarr_file in zarr_files:
-            # Skip if we already processed this zarr in the first loop
-            if zarr_file in processed_zarr_files:
-                continue
+        time_parts = time_period.split('-')
+        time_start_str = f'{int(time_parts[0]):04d}01'
+        time_end_str = f'{int(time_parts[1]):04d}12'
+        base_pattern = f'tracks_{basin}_{model}_{scenario}_{variant}_{time_start_str}_{time_end_str}'
+        
+        nc_files = list(climada_input.glob(f"{base_pattern}*.nc"))
+        
+        if nc_files:
+            print(f"\nFound {len(nc_files)} netCDF files")
+            for nc_file in nc_files:
+                draw_num = extract_draw_number(nc_file)
+                if draw_num is None or draw_num >= rfc.NUM_DRAWS:
+                    continue
                 
-            corresponding_nc = tc_risk_output / zarr_file.with_suffix('.nc').name
-            if not corresponding_nc.exists():
-                draw_num = extract_draw_number(zarr_file)
-                print(f"  🗑️  Draw {draw_num:3d}: Orphaned Zarr file (no NetCDF)")
+                # If already marked complete, skip
+                if draw_num in existing_markers:
+                    continue
+                
+                # File exists but no marker - mark as complete and create marker
+                draw_status[draw_num] = 1
+                marker_path = climada_input / f".nc_draw_{draw_num:04d}.complete"
+                marker_path.touch()
                 try:
-                    shutil.rmtree(zarr_file)
-                    print(f"    Deleted orphaned Zarr")
-                except Exception as e:
-                    print(f"    Warning: Could not delete: {e}")
+                    marker_path.chmod(0o775)
+                except:
+                    pass
+                print(f"  ✓ Draw {draw_num:3d}: File exists, created marker")
                     
     # Create DataFrame and save
     df = pd.DataFrame([
-        {'draw': draw_num, 'netcdf_complete': nc_status, 'zarr_complete': zarr_status}
-        for draw_num, (nc_status, zarr_status) in draw_status.items()
+        {'draw': draw_num, 'complete': status}
+        for draw_num, status in draw_status.items()
     ])
     
     df.to_csv(status_file, index=False)
     status_file.chmod(0o775)
     
-    # Count fully complete draws (both NetCDF and Zarr valid)
-    num_complete = sum(1 for nc, zarr in draw_status.values() if nc == 1 and zarr == 1)
+    # Count complete draws
+    num_complete = sum(1 for status in draw_status.values() if status == 1)
     num_incomplete = rfc.NUM_DRAWS - num_complete
-    num_netcdf_only = sum(1 for nc, zarr in draw_status.values() if nc == 1 and zarr == 0)
     
     print(f"\n{'='*80}")
     print(f"Draw status summary:")
-    print(f"  Fully complete (both files):  {num_complete:3d}/{rfc.NUM_DRAWS}")
-    print(f"  NetCDF only (Zarr missing):   {num_netcdf_only:3d}/{rfc.NUM_DRAWS}")
-    print(f"  Incomplete (need both files): {num_incomplete:3d}/{rfc.NUM_DRAWS}")
+    print(f"  Complete:   {num_complete:3d}/{rfc.NUM_DRAWS}")
+    print(f"  Incomplete: {num_incomplete:3d}/{rfc.NUM_DRAWS}")
     print(f"  Status file: {status_file}")
     print(f"{'='*80}\n")
     
