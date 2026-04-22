@@ -149,6 +149,7 @@ docs/sphinx/.doctrees/
 *.netcdf
 *.zarr
 *.png
+*.csv
 
 # Project outputs (generated data, not source)
 outputs/
