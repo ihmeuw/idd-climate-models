@@ -115,38 +115,61 @@ threshold_dict = {
     }
 }
 
+storm_intensity_dict = {
+    "tropical_depression": {"low": 0, "high": 18, "color": '#E0E0E0'},      # Light gray (≤17 m/s)
+    "tropical_storm":      {"low": 18, "high": 33, "color": '#4ECDC4'},     # Teal (18-32 m/s)
+    "category_1":          {"low": 33, "high": 43, "color": '#FFE66D'},     # Light yellow (33-42 m/s)
+    "category_2":          {"low": 43, "high": 50, "color": '#FF9F1C'},     # Orange (43-49 m/s)
+    "category_3":          {"low": 50, "high": 58, "color": '#FF6B35'},     # Dark orange (50-58 m/s)
+    "category_4":          {"low": 58, "high": 70, "color": '#E53935'},     # Bright red (58-70 m/s)
+    "category_5":          {"low": 70, "high": float("inf"), "color": '#4A0000'},  # Very dark red (≥70 m/s)
+}
+def classify_storm(wind_speed_ms: float) -> str | None:
+    for category, info in storm_intensity_dict.items():
+        if info['low'] < wind_speed_ms <= info['high']:
+            return category
+    return None
+
 basin_dict = {
     'EP': {
         'name': 'Eastern Pacific',
-        'most_detailed': True
+        'most_detailed': True,
+        'basin_bounds': ["180E", "0N", "290E", "60N"],
     },
     'NA': {
         'name': 'North Atlantic',
-        'most_detailed': True
+        'most_detailed': True,
+        'basin_bounds': ["260E", "0N", "360E", "60N"],
     },
     'NI': {
         'name': 'North Indian',
-        'most_detailed': True
+        'most_detailed': True,
+        'basin_bounds': ["30E", "0N", "100E", "50N"],
     },
     'SI': {
         'name': 'South Indian',
-        'most_detailed': True
+        'most_detailed': True,
+        'basin_bounds': ["20E", "45S", "100E", "0S"],
     },
     'AU': {
         'name': 'Australia',
-        'most_detailed': True
+        'most_detailed': True,
+        'basin_bounds': ["100E", "45S", "180E", "0S"],
     },
     'SP': {
         'name': 'South Pacific',
-        'most_detailed': True
+        'most_detailed': True,
+        'basin_bounds': ["180E", "45S", "250E", "0S"],
     },
     'WP': {
         'name': 'Western Pacific',
-        'most_detailed': True
+        'most_detailed': True,
+        'basin_bounds': ["100E", "0N", "180E", "60N"],
     },
     'GL': {
         'name': 'Global',
-        'most_detailed': False
+        'most_detailed': False,
+        'basin_bounds': ["0E", "90S", "360E", "90N"]
     }
 }
 

@@ -15,6 +15,7 @@ import idd_climate_models.constants as rfc
 
 # --- Core Constants from rfc ---
 # Define the core constants used in this script
+FOLDER_STRUCTURE = rfc.FOLDER_STRUCTURE
 MODELS_TO_RUN = ['ACCESS-CM2', 'EC-Earth3', 'EC-Earth3-Veg','EC-Earth3-Veg-LR', 'MIROC6', 'MPI-ESM1-2-HR', 'MPI-ESM1-2-LR', 'MRI-ESM2-0']
 BIN_SIZE_YEARS = 20
 DATA_SOURCE = "cmip6"
@@ -38,15 +39,20 @@ TIME_BINS: Dict[str, List[Tuple[int, int]]] = {
     for scenario in ssp_scenario_map
 }
 
-def get_output_dir(model: str, scenario: str, time_period: Tuple[int, int]) -> Path:
+def get_dir(data_type: str, io_type: str, model: str, scenario: str, time_period: Tuple[int, int]) -> Path:
     """Constructs the parent directory for a time bin."""
     # Simplified Path construction
     time_period_str = f'{time_period[0]}-{time_period[1]}'
-    return TC_RISK_OUTPUT_PATH / DATA_SOURCE / model / VARIANT / scenario / time_period_str
+    return FOLDER_STRUCTURE[data_type][io_type]['base'] / DATA_SOURCE / model / VARIANT / scenario / time_period_str
 
-def get_track_path(model: str, scenario: str, time_period: Tuple[int, int], basin: str, draw: int) -> Path:
+# This function is kept for backwards compatibility, but the new get_track_path is more robust and should be used for all new code.
+def get_output_dir(model: str, scenario: str, time_period: Tuple[int, int]) -> Path:
+    """Constructs the parent directory for a time bin."""
+    return get_dir(data_type='tc_risk', io_type='output', model=model, scenario=scenario, time_period=time_period)
+
+def get_track_path(model: str, scenario: str, time_period: Tuple[int, int], basin: str, draw: int, data_type='tc_risk', io_type='output') -> Path:
     """Constructs the full file path for a track file."""
-    output_dir_parent = get_output_dir(model, scenario, time_period)
+    output_dir_parent = get_dir(data_type=data_type, io_type=io_type, model=model, scenario=scenario, time_period=time_period)
     
     # Draws are 1-based, array indices are 0-based (e.g., draw 1 is _e0)
     draw_text = f'_e{draw - 1}' if draw > 0 else ''

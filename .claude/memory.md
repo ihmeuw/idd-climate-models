@@ -1,43 +1,33 @@
-# Claude Session Memory
+# Session memory
+Updated: 2026-04-20 17:45
 
-**Last Updated:** 2026-01-26
+## Current task
+Added `plot_all_tracks()` to visualizers.py — plots all storm tracks from a TC Risk draw with date/basin/country filtering. Working on fixing the longitude wrapping so EP basin tracks display correctly (not spanning the whole globe).
 
-## Current Task
-Updated `00_orchestrator.py` to use the new simplified `02_process_variable.py` script. Ready for testing.
+## Context / why
+Bobby wanted a function to visualize all tracks in a draw, filterable by date range, basin, and country impact. The notebook `visualize_tc_risk_output.ipynb` needed this capability.
 
-## Workflow Structure (4 Levels)
-1. **Level 1**: Create folders (`01_create_folders.py`)
-2. **Level 2**: Process raw → time-period files directly (`02_process_variable.py`)
-3. **Level 3**: Run global TC-risk (`04_run_global_tc_risk.py`)
-4. **Level 4**: Run basin TC-risk (`05_run_basin_tc_risk.py`)
+## Where we are
+- `plot_all_tracks()` written in `src/idd_climate_models/storm_data/visualizers.py` and exported from `__init__.py`
+- Three example cells added to the notebook (all 2089 storms, storms hitting any country, storms hitting US)
+- Longitude wrapping: created `src/idd_climate_models/storm_data/geo_utils.py` with `reproject_gdf_to_360()` — splits polygons at the prime meridian, shifts western half by +360
+- `plot_all_tracks` now checks if track bbox crosses 0°: if not, converts tracks to 0-360 and uses `reproject_gdf_to_360()` for the shapefile
+- **NOT YET TESTED** — the latest shapefile reprojection approach hasn't been run yet
+- Also fixed a pre-existing bug: cell 10 in the notebook left a netCDF file handle open, causing HDF errors in later cells (added `ds.close()`)
+- `rotate_shapefiles.py` still exists in notebooks/visualizations/ — Bobby approved deletion but the command was cancelled. Delete it next session.
+- Test file `tests/test_plot_all_tracks.py` exists but was never run (pytest not installed in env)
 
-## What `02_process_variable.py` Does
-1. Find raw files that overlap with time period (parses dates from filenames)
-2. Load with `xr.open_mfdataset()` (lazy)
-3. Clip to time period years with `ds.sel(time=slice(...))`
-4. Load into memory with `.compute()`
-5. Fill NaNs (optimized: detects constant mask, computes EDT once)
-6. Optionally regrid
-7. Save directly to `TC_RISK_INPUT_PATH/.../time_period/`
+## Files changed
+- `src/idd_climate_models/storm_data/visualizers.py` — added `plot_all_tracks()`
+- `src/idd_climate_models/storm_data/geo_utils.py` — NEW, `reproject_gdf_to_360()`
+- `src/idd_climate_models/storm_data/__init__.py` — added exports
+- `notebooks/visualizations/visualize_tc_risk_output.ipynb` — import, ds.close() fix, 3 example cells
+- `tests/test_plot_all_tracks.py` — NEW, untested
 
-## Resource Allocation
-- Daily data (ua, va): 100G memory, 4h runtime
-- Monthly data (tos, psl, hus, ta): 16G memory, 1h runtime
+## Next steps
+1. Restart kernel, run the notebook to verify the 0-360 reprojection works
+2. Delete `notebooks/visualizations/rotate_shapefiles.py`
+3. If the map looks right, done. If not, debug the geo_utils reprojection.
 
-## Files in Pipeline
-- `00_orchestrator.py` - orchestrates the workflow
-- `01_create_folders.py` - creates directories
-- `02_process_variable.py` - process raw → time-period file directly
-- `04_run_global_tc_risk.py` - global TC-risk
-- `05_run_basin_tc_risk.py` - basin TC-risk
-
-## Next Steps
-1. Run the orchestrator with TEST_RUN=1 to test
-2. If successful, set TEST_RUN=0 for full run
-
-## Resume Prompt
-```
-Continuing idd-climate-models work. Updated orchestrator to use new 4-level workflow:
-folders → process_variable → global_tc_risk → basin_tc_risk. Ready to test.
-See .claude/memory.md for details.
-```
+## Resume prompt
+We added `plot_all_tracks()` to `storm_data/visualizers.py` for plotting all TC Risk tracks with date/basin/country filters. The longitude wrapping for Pacific basins was the main challenge — after two failed attempts, we extracted Bobby's `rotate_shapefiles.py` logic into `storm_data/geo_utils.py` (`reproject_gdf_to_360`), which splits shapefile polygons at 0° and shifts the western half to 0-360 space. The function is wired in but the latest version hasn't been tested yet. The notebook has three example cells ready. Also fixed a netCDF file handle leak in cell 10. Next: restart kernel and test.
