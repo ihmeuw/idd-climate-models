@@ -139,11 +139,19 @@ docs/sphinx/.doctrees/
 *.temp
 *.log
 
-# Large files (adjust as needed)
+# Large files
 *.h5
 *.hdf5
 *.parquet
 *.feather
+*.pkl
+*.nc
+*.netcdf
+*.zarr
+*.png
+
+# Project outputs (generated data, not source)
+outputs/
 
 # Core dumps
 core
