@@ -25,6 +25,13 @@ script in `03_admin_level_paf_main.py`,
 re-run the 0-360 and antimeridian-normalization pre-stages so the
 team-mount parquets reflect the new release.
 
+Note: the `/ibtracs/` folder mirrors most — but not all — of the main
+scripts. The two Stage 4 downstream-task scripts
+(`04_admin_level_exposure_a_resource_assignment.py` and
+`04_admin_level_exposure_b_post_processing.py`) are **main-only**; the
+ibtracs side has no matching files for them. See **Stage 4 — ibtracs
+differences** below.
+
 ## Pre-stage — generating the FHS population totals parquet
 
 `POP_TOTALS_PATH` points to `fhs_population_2023_all_years.parquet`, a
@@ -1044,6 +1051,34 @@ bridge → Part B → post-processing**.
   downstream Jobmon task in the 4B workflow with all per-(storm × loc)
   tasks as upstream dependencies (see Part B's "Post-processing
   downstream task" subsection).
+
+### Stage 4 — ibtracs differences
+
+The two downstream-task scripts above
+(`04_admin_level_exposure_a_resource_assignment.py` and
+`04_admin_level_exposure_b_post_processing.py`) are **main-only**. They
+exist to manage the synthetic-CMIP6 pipeline's scale (35M+ tasks) and
+have no equivalent in `/ibtracs/`, which operates on the much smaller
+set of historical observed storms. On the ibtracs side:
+
+- **Resource assignment is inline, not a separate task.** Where main
+  runs `..._a_resource_assignment.py` as a downstream Jobmon task to
+  compile every Part A metadata parquet and bin each (storm × location)
+  task into a size class by `area_100m2`, the ibtracs launchers assign
+  **fixed** resource budgets directly. `04_admin_level_exposure_a_launcher.py`
+  sets a flat `memory = '15G'`, and `04_admin_level_exposure_b_launcher.py`
+  reads 4A's per-storm metadata parquets directly
+  (`META_ROOT.glob("**/*.parquet")`) and sets a flat `memory = '5G'`.
+  No compiled-metadata bridge parquet is produced or consumed.
+
+- **There is no output-consolidation step.** The ibtracs 4B launcher
+  adds only the per-(storm × location) compute tasks — there is no
+  downstream post-processing task and no `stage4b/_consolidated/...`
+  parquet. At ibtracs scale the per-storm outputs are consumed directly.
+
+To bump data versions on the ibtracs side, edit the same module-level
+constants in the ibtracs `*_main.py` files; there is nothing extra to
+edit for the (absent) downstream tasks.
 
 ### Part B — Per-(storm, location) compute
 

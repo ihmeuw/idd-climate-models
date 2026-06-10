@@ -29,31 +29,20 @@ from rasterra import RasterArray  # type: ignore
 warnings.simplefilter("ignore", FutureWarning)
 
 
-parser = argparse.ArgumentParser(description="Run CLIMADA code")
+parser = argparse.ArgumentParser(description="Run CLIMADA stage 4B for a group of tasks")
 
-# Define arguments
-parser.add_argument("--source_id", type=str, required=True, help="Source Id")
-parser.add_argument("--variant_label", type=str, required=True, help="Variant Label")
-parser.add_argument("--experiment_id", type=str, required=True, help="Experiment Id")
-parser.add_argument("--batch_year", type=str, required=True, help="Batch Year")
-parser.add_argument("--basin", type=str, required=True, help="Basin")
-parser.add_argument("--draw", type=str, required=True, help="Draw")
-parser.add_argument("--storm_id", type=str, required=True, help="Storm ID")
-parser.add_argument("--location_id", type=int, required=True, help="Location ID for admin unit")
-parser.add_argument("--num_cores", type=int, default=5, help="Number of cores for parallel processing")
+parser.add_argument(
+    "--grouped_tasks_parquet", type=str, required=True,
+    help="Path to the per-workflow grouped task parquet produced by the launcher",
+)
+parser.add_argument(
+    "--group_id", type=int, required=True,
+    help="Integer group_id; selects the subset of rows to process from the parquet",
+)
 
-
-# Parse arguments
 args = parser.parse_args()
-source_id = args.source_id
-variant_label = args.variant_label
-experiment_id = args.experiment_id
-batch_year = args.batch_year
-basin = args.basin
-draw = args.draw
-storm_id = args.storm_id
-location_id = args.location_id
-num_cores = args.num_cores
+grouped_tasks_parquet = args.grouped_tasks_parquet
+group_id = args.group_id
 
 
 
@@ -840,6 +829,20 @@ def save_yearly_exposure(
         print(f"⚠️ Could not set permissions for {save_path}: {e}")
 
 
+def _is_task_complete(row, save_root: Path = SAVE_ROOT) -> bool:
+    """Return True if a ≥1 KB output parquet already exists for this task."""
+    draw_dir = (
+        save_root
+        / row.source_id / row.variant_label / row.experiment_id
+        / row.batch_year / row.basin
+        / f"tc_risk_draw_{int(row.draw)}" / "storm_exposure"
+    )
+    if not draw_dir.exists():
+        return False
+    pattern = f"storm_{int(row.storm_id):04d}_loc_{int(row.location_id)}_*.parquet"
+    return any(f.stat().st_size >= 1024 for f in draw_dir.rglob(pattern))
+
+
 def save_draw_dataframe(
     source_id: str,
     variant_label: str,
@@ -1242,15 +1245,47 @@ def process_single_storm(
     del storm_records
 
 
-process_single_storm(
-    source_id=source_id,
-    variant_label=variant_label,
-    experiment_id=experiment_id,
-    batch_year=batch_year,
-    basin=basin,
-    draw=draw,
-    storm_id=storm_id,
-    location_id=location_id,
-    num_cores=num_cores,
-)
+def main(grouped_tasks_parquet: str, group_id: int) -> None:
+    group_df = pd.read_parquet(grouped_tasks_parquet)
+    group_df = group_df[group_df["group_id"] == group_id].reset_index(drop=True)
+
+    if group_df.empty:
+        print(f"⚠️ No tasks found for group_id={group_id} in {grouped_tasks_parquet}")
+        return
+
+    total = len(group_df)
+    print(f"Group {group_id}: {total} tasks total.")
+
+    # 1. Check which tasks still need to run.
+    pending_rows = [
+        row for row in group_df.itertuples(index=False)
+        if not _is_task_complete(row)
+    ]
+    n_skipped = total - len(pending_rows)
+    print(
+        f"  {n_skipped} already complete (skipping), "
+        f"{len(pending_rows)} pending."
+    )
+
+    # 2. Run pending tasks serially.
+    for i, row in enumerate(pending_rows):
+        print(
+            f"  [{i + 1}/{len(pending_rows)}] "
+            f"storm={row.storm_id} loc={row.location_id} "
+            f"draw={row.draw} basin={row.basin} batch={row.batch_year}"
+        )
+        process_single_storm(
+            source_id=row.source_id,
+            variant_label=row.variant_label,
+            experiment_id=row.experiment_id,
+            batch_year=row.batch_year,
+            basin=row.basin,
+            draw=row.draw,
+            storm_id=row.storm_id,
+            location_id=row.location_id,
+            num_cores=1,
+        )
+
+
+main(grouped_tasks_parquet, group_id)
     

@@ -32,36 +32,28 @@ from rasterra import RasterArray  # type: ignore
 warnings.simplefilter("ignore", FutureWarning)
 
 
-parser = argparse.ArgumentParser(description="Run CLIMADA code")
+parser = argparse.ArgumentParser(description="Run CLIMADA stage 4A for a group of tasks")
 
-# Define arguments
-parser.add_argument("--source_id", type=str, required=True, help="Source Id")
-parser.add_argument("--variant_label", type=str, required=True, help="Variant Label")
-parser.add_argument("--experiment_id", type=str, required=True, help="Experiment Id")
-parser.add_argument("--batch_year", type=str, required=True, help="Batch Year")
-parser.add_argument("--basin", type=str, required=True, help="Basin")
-parser.add_argument("--draw_batch", type=str, required=True, help="Draw Batch")
-parser.add_argument("--admin_level", type=int, required=True, help="Admin level (e.g., 0, 1 or 2)")
-parser.add_argument("--num_cores", type=int, default=5, help="Number of cores for parallel processing")
+parser.add_argument(
+    "--grouped_tasks_parquet", type=str, required=True,
+    help="Path to the per-workflow grouped task parquet produced by the launcher",
+)
+parser.add_argument(
+    "--group_id", type=int, required=True,
+    help="Integer group_id; selects the subset of rows to process from the parquet",
+)
 
-
-# Parse arguments
 args = parser.parse_args()
-source_id = args.source_id
-variant_label = args.variant_label
-experiment_id = args.experiment_id
-batch_year = args.batch_year
-basin = args.basin
-draw_batch = args.draw_batch
-num_cores = args.num_cores
-admin_level = args.admin_level
+grouped_tasks_parquet = args.grouped_tasks_parquet
+group_id = args.group_id
 
 
 
 
 # Constants
+ADMIN_LEVEL = 0
 ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage1_v2")
-SAVE_ROOT = Path(f"/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage4a_metadata_admin{admin_level}")
+SAVE_ROOT = Path(f"/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage4a_metadata_admin{ADMIN_LEVEL}")
 
 GDF_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/data/global_shapefile/")
 GRIDED_POP_PATH = Path("/mnt/team/rapidresponse/pub/population-model/results/2026_05_16/")
@@ -1417,53 +1409,64 @@ def process_single_draw(args):
 
 
 
-def main(
-    source_id: str,
-    variant_label: str,
-    experiment_id: str,
-    batch_year: str,
-    basin: str,
-    draw_batch: str,
-    admin_level: int,
-    num_cores: int,
-):
-    start_draw, end_draw = map(int, draw_batch.split("-"))
-    draws = list(range(start_draw, end_draw + 1))
-
-    
-    # Generate basin-wide template raster once
-    template_raster = generate_basin_template_raster(basin, res=0.1)
-
-    draw_args = [
-        (
-            source_id,
-            variant_label,
-            experiment_id,
-            batch_year,
-            basin,
-            draw,
-            template_raster,
-            admin_level,
-        )
-        for draw in draws
-    ]
-
-    run_parallel(
-        runner=process_single_draw,
-        arg_list=draw_args,
-        num_cores=num_cores,
+def _is_task_complete(row) -> bool:
+    """Return True if this draw's admin-level metadata parquet exists and is valid."""
+    return check_if_draw_is_complete(
+        source_id=row.source_id,
+        variant_label=row.variant_label,
+        experiment_id=row.experiment_id,
+        batch_year=row.batch_year,
+        basin=row.basin,
+        draw=int(row.draw),
     )
-    print("Completed Parallel Tasks")
 
 
-main(
-    source_id=source_id,
-    variant_label=variant_label,
-    experiment_id=experiment_id,
-    batch_year=batch_year,
-    basin=basin,
-    draw_batch=draw_batch,
-    admin_level=admin_level,
-    num_cores=num_cores,
-)
+def main(grouped_tasks_parquet: str, group_id: int) -> None:
+    group_df = pd.read_parquet(grouped_tasks_parquet)
+    group_df = group_df[group_df["group_id"] == group_id].reset_index(drop=True)
+
+    if group_df.empty:
+        print(f"⚠️ No tasks found for group_id={group_id} in {grouped_tasks_parquet}")
+        return
+
+    total = len(group_df)
+    print(f"Group {group_id}: {total} tasks total.")
+
+    # 1. Check which draws still need to run.
+    pending_rows = [
+        row for row in group_df.itertuples(index=False)
+        if not _is_task_complete(row)
+    ]
+    n_skipped = total - len(pending_rows)
+    print(
+        f"  {n_skipped} already complete (skipping), "
+        f"{len(pending_rows)} pending."
+    )
+
+    # Cache basin template rasters — one per unique basin in this group.
+    template_cache: dict = {}
+
+    # 2. Run pending draws serially.
+    for i, row in enumerate(pending_rows):
+        print(
+            f"  [{i + 1}/{len(pending_rows)}] "
+            f"draw={row.draw} basin={row.basin} "
+            f"batch={row.batch_year} {row.source_id}/{row.variant_label}"
+        )
+        if row.basin not in template_cache:
+            template_cache[row.basin] = generate_basin_template_raster(row.basin, res=0.1)
+
+        process_single_draw((
+            row.source_id,
+            row.variant_label,
+            row.experiment_id,
+            row.batch_year,
+            row.basin,
+            int(row.draw),
+            template_cache[row.basin],
+            ADMIN_LEVEL,
+        ))
+
+
+main(grouped_tasks_parquet, group_id)
     

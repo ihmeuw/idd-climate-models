@@ -22,18 +22,17 @@ METRIC_COLS = [
     "num_admin0_first_year", "num_years_in_batch", "estimated_admin0_total",
 ]
 
-_ADMIN0_BINS   = [0, 60, 100, np.inf]
-_ADMIN0_LABELS = ["small", "medium", "large"]
+_ADMIN0_BINS   = [0, 100, np.inf]
+_ADMIN0_LABELS = ["heavy", "light"]
 
-# 3 resource templates derived from workflow 583912 (8 priority draws).
-# Max memory within each admin0 group + runtime doubled from 95th-pct observed.
-#   small  (estimated_admin0_total  0–60):  Heavy  — 50G / 36 min
-#   medium (estimated_admin0_total 61–100): Medium — 44G / 38 min
-#   large  (estimated_admin0_total  100+):  Light  — 34G / 38 min
+# 2 resource templates derived from workflow 584066 (8 priority draws).
+# Memory capped at 50G; ×2 retry gives 100G on attempt 2 (covers 88G observed max).
+# Runtime sized at observed max + ~10% buffer per group.
+#   heavy (estimated_admin0_total   0–100): 50G / 50 min
+#   light (estimated_admin0_total   100+):  30G / 25 min
 _RESOURCE_TABLE = pd.DataFrame([
-    {"admin0_bin": "small",  "memory_gb_assigned": 50, "runtime_min_assigned": 36},
-    {"admin0_bin": "medium", "memory_gb_assigned": 44, "runtime_min_assigned": 38},
-    {"admin0_bin": "large",  "memory_gb_assigned": 34, "runtime_min_assigned": 38},
+    {"admin0_bin": "heavy", "memory_gb_assigned": 50, "runtime_min_assigned": 50},
+    {"admin0_bin": "light", "memory_gb_assigned": 30, "runtime_min_assigned": 25},
 ])
 
 if not META_PARQUET.exists():
@@ -180,7 +179,7 @@ PRIORITY_DRAWS = [
 #   "non_priority" — submit everything EXCEPT PRIORITY_DRAWS (default state)
 #   "priority"     — submit ONLY PRIORITY_DRAWS (for testing / smoke runs)
 #   "all"          — submit every storm_draw, priority ones first
-PRIORITY_MODE = "priority"
+PRIORITY_MODE = "all"
 
 if PRIORITY_MODE == "non_priority":
     full_tasks_df = full_tasks_df[~full_tasks_df["storm_draw"].isin(PRIORITY_DRAWS)]
