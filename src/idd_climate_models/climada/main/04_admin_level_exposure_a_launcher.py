@@ -1,16 +1,30 @@
 import uuid
 import numpy as np
 import pandas as pd  # type: ignore
+import pyarrow.parquet as pq  # type: ignore
 from jobmon.client.tool import Tool  # type: ignore
 from pathlib import Path
 
+# ── Admin level ───────────────────────────────────────────────────────────────
+# Set to 0 or 1. Controls output root, task filtering, and the --admin_level
+# flag passed to the main script.
+ADMIN_LEVEL = 1
 
-ADMIN_LEVEL = 0
+# ── Completion scan ───────────────────────────────────────────────────────────
+# True  — walk the output tree to skip already-completed draws (normal mode).
+# False — submit all draws; each worker's check_if_draw_is_complete handles
+#         resume. Use when NFS is under heavy load or for a forced fresh run.
+CHECK_COMPLETION = False
 DRAW_BATCHES = [f"{i}-{i}" for i in range(100)]
 
 SAVE_ROOT = Path(
     f"/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage4a_metadata_admin{ADMIN_LEVEL}"
 )
+
+ADMIN1_META_PARQUET = Path(
+    "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin1_count.parquet"
+)
+_UNIQUE_KEYS = ["source_id", "variant_label", "experiment_id", "batch_year", "basin"]
 
 TASK_RUNTIME_MIN = 5
 TASK_MEMORY_GB = 5
@@ -41,17 +55,42 @@ def _stage4a_draw_metadata_path(
     )
 
 
-def task_is_complete(row) -> bool:
-    """Return True iff the draw's admin-level metadata parquet exists and is ≥ 1 KB."""
-    path = _stage4a_draw_metadata_path(
-        source_id=row["source_id"],
-        variant_label=row["variant_label"],
-        experiment_id=row["experiment_id"],
-        batch_year=row["batch_year"],
-        basin=row["basin"],
-        draw=int(row["draw"]),
+def _gather_completed_tasks() -> set[tuple]:
+    """Walk the output tree once to find all valid admin_level_metadata parquets.
+    A single rglob is far faster than 30k individual NFS stat calls.
+    Files < 1KB are skipped (likely truncated from an interrupted write).
+    Files that open cleanly via pyarrow are validated; corrupt files are excluded."""
+    completed: set[tuple] = set()
+    if not SAVE_ROOT.exists():
+        return completed
+    for path in SAVE_ROOT.rglob("admin_level_metadata/admin_level_metadata_*.parquet"):
+        if path.stat().st_size < 1024:
+            continue
+        try:
+            pf = pq.ParquetFile(path)
+            if pf.metadata.num_rows == 0:
+                continue
+        except Exception:
+            continue
+        # Path structure: SAVE_ROOT/source_id/variant_label/experiment_id/
+        #                 batch_year/basin/tc_risk_draw_{draw}/admin_level_metadata/file
+        parts = path.relative_to(SAVE_ROOT).parts
+        if len(parts) < 7:
+            continue
+        try:
+            draw = int(parts[5].split("_")[-1])  # "tc_risk_draw_{draw}"
+        except ValueError:
+            continue
+        completed.add((parts[0], parts[1], parts[2], parts[3], parts[4], draw))
+    return completed
+
+
+def task_is_complete(row, completed: set[tuple]) -> bool:
+    key = (
+        row["source_id"], row["variant_label"], row["experiment_id"],
+        row["batch_year"], row["basin"], int(row["draw"]),
     )
-    return path.exists() and path.stat().st_size >= 1024
+    return key in completed
 
 
 def assign_groups(
@@ -97,13 +136,21 @@ full_tasks["draw"] = full_tasks["draw_batch"].str.split("-").str[0].astype(int)
 full_tasks = full_tasks.drop(columns=["draw_batch"])
 
 ############################################################################################
-# Completion scan — filesystem-based, not Jobmon-based.
-completed_mask = full_tasks.apply(task_is_complete, axis=1)
-remaining_tasks = full_tasks[~completed_mask].copy().reset_index(drop=True)
-print(
-    f"Completion scan: {completed_mask.sum()} / {len(full_tasks)} tasks "
-    f"already done on disk; {len(remaining_tasks)} tasks to submit."
-)
+# Completion scan — skipped when CHECK_COMPLETION=False (fresh run / NFS latency).
+# When skipped, each worker's check_if_draw_is_complete handles per-draw resume.
+if CHECK_COMPLETION:
+    print("Scanning completed tasks...")
+    completed_keys = _gather_completed_tasks()
+    print(f"Found {len(completed_keys):,} valid parquets on disk.")
+    completed_mask = full_tasks.apply(lambda row: task_is_complete(row, completed_keys), axis=1)
+    remaining_tasks = full_tasks[~completed_mask].copy().reset_index(drop=True)
+    print(
+        f"Completion scan: {completed_mask.sum()} / {len(full_tasks)} tasks "
+        f"already done on disk; {len(remaining_tasks)} tasks to submit."
+    )
+else:
+    remaining_tasks = full_tasks.copy().reset_index(drop=True)
+    print(f"Completion scan skipped — submitting all {len(remaining_tasks):,} tasks.")
 
 #######################################################################
 project = "proj_rapidresponse"
@@ -114,9 +161,12 @@ RESOURCE_ASSIGNMENT_SCRIPT = (
     Path(__file__).resolve().parent / "04_admin_level_exposure_a_resource_assignment.py"
 )
 
-tool = Tool(name="CLIMADA_stage4")
+tool = Tool(name=f"CLIMADA_stage4a_admin{ADMIN_LEVEL}")
 
-workflow = tool.create_workflow(name=f"CLIMADA_stage4_{wf_uuid}")
+workflow = tool.create_workflow(
+    name=f"CLIMADA_stage4a_admin{ADMIN_LEVEL}_{wf_uuid}",
+    max_concurrently_running=3000,
+)
 
 workflow.set_default_compute_resources_from_dict(
     cluster_name="slurm",
@@ -154,7 +204,7 @@ if not remaining_tasks.empty:
     memory_str = f"{TASK_MEMORY_GB}G"
 
     task_template = tool.get_task_template(
-        template_name=f"CLIMADA_stage4a_{memory_str}_{runtime_str}",
+        template_name=f"CLIMADA_stage4a_admin{ADMIN_LEVEL}_{memory_str}_{runtime_str}",
         default_cluster_name="slurm",
         default_compute_resources={
             "queue": "all.q",
@@ -164,14 +214,15 @@ if not remaining_tasks.empty:
             "project": project,
         },
         default_resource_scales={
-            "memory": lambda x: int(x * 1.5),
-            "runtime": lambda x: int(x * 3),
+            "memory": 1.5,
+            "runtime": 3.0,
         },
         max_attempts=5,
         command_template=(
             f"python {MAIN_SCRIPT} "
             f"--grouped_tasks_parquet {grouped_parquet_path} "
-            "--group_id {group_id}"
+            "--group_id {group_id} "
+            f"--admin_level {ADMIN_LEVEL}"
         ),
         node_args=["group_id"],
     )
@@ -190,7 +241,7 @@ if not remaining_tasks.empty:
 # are done. When resume filters tasks to empty it still runs (no upstreams =
 # fires immediately).
 resource_assignment_template = tool.get_task_template(
-    template_name="CLIMADA_stage4a_resource_assignment",
+    template_name=f"CLIMADA_stage4a_admin{ADMIN_LEVEL}_resource_assignment",
     default_cluster_name="slurm",
     default_compute_resources={
         "queue": "all.q",
@@ -200,16 +251,19 @@ resource_assignment_template = tool.get_task_template(
         "project": project,
     },
     default_resource_scales={
-        "memory": lambda x: int(x * 1.5),
-        "runtime": lambda x: int(x * 2),
+        "memory": 1.5,
+        "runtime": 2.0,
     },
     max_attempts=2,
-    command_template=f"python {RESOURCE_ASSIGNMENT_SCRIPT}",
+    command_template=(
+        f"python {RESOURCE_ASSIGNMENT_SCRIPT} "
+        f"--admin_level {ADMIN_LEVEL}"
+    ),
     node_args=[],
 )
 
 resource_assignment_task = resource_assignment_template.create_task(
-    name="CLIMADA_stage4a_resource_assignment",
+    name=f"CLIMADA_stage4a_admin{ADMIN_LEVEL}_resource_assignment",
     upstream_tasks=tasks,
 )
 

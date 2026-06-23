@@ -8,32 +8,59 @@ from pathlib import Path
 
 RELATIVE_RISKS = ["indirect_resp_draw", "indirect_cvd_draw"]
 
-SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage3_v2/")
 STORM_DRAW_TABLE_PATH = Path("/mnt/team/rapidresponse/pub/tropical-storms/storm_draw_table.csv")
 
-META_PARQUET = Path(
-    "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin0_count.parquet"
-)
-GENERATE_SCRIPT = Path(__file__).resolve().parent / "generate_storm_draw_admin0_count.py"
+# ── Admin level ───────────────────────────────────────────────────────────────
+# Set to 0 or 1. Controls which metadata parquet, shapefile, and output root
+# are used. All other launcher logic is identical across levels.
+ADMIN_LEVEL = 1
+
+if ADMIN_LEVEL == 0:
+    SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage3_v2/")
+    META_PARQUET = Path(
+        "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin0_count.parquet"
+    )
+    GENERATE_SCRIPT = Path(__file__).resolve().parent / "generate_storm_draw_admin0_count.py"
+    METRIC_COLS = [
+        "n_storms_in_batch", "estimated_storms_per_year", "year",
+        "num_admin0_first_year", "num_years_in_batch", "estimated_admin0_total",
+    ]
+    _ESTIMATED_TOTAL_COL = "estimated_admin0_total"
+    # Derived from workflow 584066 (8 priority draws): observed max 88G / 45min.
+    # Memory capped at 50G; ×2 retry gives 100G on attempt 2.
+    _RESOURCE_TABLE = pd.DataFrame([
+        {"resource_bin": "heavy", "memory_gb_assigned": 50, "runtime_min_assigned": 50},
+        {"resource_bin": "light", "memory_gb_assigned": 50, "runtime_min_assigned": 35},
+    ])
+elif ADMIN_LEVEL == 1:
+    SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage3_v2_admin1/")
+    META_PARQUET = Path(
+        "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin1_count.parquet"
+    )
+    GENERATE_SCRIPT = Path(__file__).resolve().parent / "generate_storm_draw_admin1_count.py"
+    METRIC_COLS = [
+        "n_storms_in_batch", "estimated_storms_per_year", "year",
+        "num_admin1_first_year", "num_years_in_batch", "estimated_admin1_total",
+    ]
+    _ESTIMATED_TOTAL_COL = "estimated_admin1_total"
+    # Admin1 resources from priority draw profiling.
+    # heavy (0–100): max 3.61G / 7min  → 4G / 8min
+    # light (100+):  max 9.80G / 4min  → 10G / 5min
+    # default (estimated_admin1_total == 0, SP/SI tasks with storms in later
+    # years but no year-1 admin1 intersection): 8G / 8min
+    _RESOURCE_TABLE = pd.DataFrame([
+        {"resource_bin": "heavy", "memory_gb_assigned": 4, "runtime_min_assigned": 8},
+        {"resource_bin": "light", "memory_gb_assigned": 10, "runtime_min_assigned": 5},
+    ])
+    DEFAULT_MAX_RUN_TIME_MIN = 8
+    DEFAULT_MEMORY_GB = 8
+else:
+    raise ValueError(f"ADMIN_LEVEL must be 0 or 1, got {ADMIN_LEVEL!r}")
 
 UNIQUE_KEYS = ["source_id", "variant_label", "experiment_id", "batch_year", "basin"]
-METRIC_COLS = [
-    "n_storms_in_batch", "estimated_storms_per_year", "year",
-    "num_admin0_first_year", "num_years_in_batch", "estimated_admin0_total",
-]
 
-_ADMIN0_BINS   = [0, 100, np.inf]
-_ADMIN0_LABELS = ["heavy", "light"]
-
-# 2 resource templates derived from workflow 584066 (8 priority draws).
-# Memory capped at 50G; ×2 retry gives 100G on attempt 2 (covers 88G observed max).
-# Runtime sized at observed max + ~10% buffer per group.
-#   heavy (estimated_admin0_total   0–100): 50G / 50 min
-#   light (estimated_admin0_total   100+):  30G / 25 min
-_RESOURCE_TABLE = pd.DataFrame([
-    {"admin0_bin": "heavy", "memory_gb_assigned": 50, "runtime_min_assigned": 50},
-    {"admin0_bin": "light", "memory_gb_assigned": 30, "runtime_min_assigned": 25},
-])
+_RESOURCE_BINS   = [0, 100, np.inf]
+_RESOURCE_LABELS = ["heavy", "light"]
 
 if not META_PARQUET.exists():
     print(f"Metadata parquet not found at {META_PARQUET}. Running generation script...")
@@ -105,14 +132,14 @@ def assign_resources(df: pd.DataFrame) -> pd.DataFrame:
     df["num_cores"] = DEFAULT_NUM_CORES
     df["max_run_time"] = DEFAULT_MAX_RUN_TIME_MIN
     df["memory_gb"] = DEFAULT_MEMORY_GB
-    df["admin0_bin"] = pd.cut(
-        df["estimated_admin0_total"], bins=_ADMIN0_BINS, labels=_ADMIN0_LABELS, right=True
+    df["resource_bin"] = pd.cut(
+        df[_ESTIMATED_TOTAL_COL], bins=_RESOURCE_BINS, labels=_RESOURCE_LABELS, right=True
     ).astype(str)
-    df = df.merge(_RESOURCE_TABLE, on="admin0_bin", how="left")
+    df = df.merge(_RESOURCE_TABLE, on="resource_bin", how="left")
     matched = df["memory_gb_assigned"].notna()
     df.loc[matched, "memory_gb"] = df.loc[matched, "memory_gb_assigned"].astype(int)
     df.loc[matched, "max_run_time"] = df.loc[matched, "runtime_min_assigned"].astype(int)
-    df = df.drop(columns=["admin0_bin", "memory_gb_assigned", "runtime_min_assigned"])
+    df = df.drop(columns=["resource_bin", "memory_gb_assigned", "runtime_min_assigned"])
     print(f"Resources: {matched.sum()} tasks from table, {(~matched).sum()} using defaults.")
     print(
         f"Memory range: {df['memory_gb'].min()}G-{df['memory_gb'].max()}G | "
@@ -243,12 +270,12 @@ wf_uuid = uuid.uuid4()
 # can be moved without breaking the command).
 MAIN_SCRIPT = Path(__file__).resolve().parent / "03_admin_level_paf_main.py"
 
-tool = Tool(name="CLIMADA_stage3")
+tool = Tool(name=f"CLIMADA_stage3_admin{ADMIN_LEVEL}")
 
 
 # Create a workflow, and set the executor
 workflow = tool.create_workflow(
-    name=f"CLIMADA_stage3_{wf_uuid}",
+    name=f"CLIMADA_stage3_admin{ADMIN_LEVEL}_{wf_uuid}",
     # max_concurrently_running = 100,
 )
 
@@ -276,7 +303,7 @@ for _, config in unique_configs.iterrows():
     config_key = f"{config['max_run_time']}_{config['num_cores']}_{config['memory_req']}"
     
     task_templates[config_key] = tool.get_task_template(
-        template_name=f"CLIMADA_stage3_{config_key}",
+        template_name=f"CLIMADA_stage3_admin{ADMIN_LEVEL}_{config_key}",
         default_cluster_name="slurm",
         default_compute_resources={
             "queue": "all.q",
@@ -286,8 +313,8 @@ for _, config in unique_configs.iterrows():
             "project": project,
         },
         default_resource_scales={
-            "memory": 2,  # scale memory by 100% on retry
-            "runtime": lambda x: int(x*1.25),  # scale runtime by 25%
+            "memory": 1.25,
+            "runtime": 1.75,
         },
         max_attempts=5,
         command_template=(
@@ -300,7 +327,8 @@ for _, config in unique_configs.iterrows():
             "--basin {basin} "
             "--relative_risk {relative_risk} "
             "--sample_name {sample_name} "
-            "--num_cores {num_cores}"
+            "--num_cores {num_cores} "
+            f"--admin_level {ADMIN_LEVEL}"
         ),
         node_args=["storm_draw", "source_id", "variant_label", "experiment_id", "batch_year", "basin", "relative_risk", "sample_name", "num_cores"],
         task_args=[],
@@ -315,7 +343,7 @@ for row in remaining_long.itertuples():
 
     task = template.create_task(
         name=(
-            f"CLIMADA_stage3_"
+            f"CLIMADA_stage3_a{ADMIN_LEVEL}_"
             f"sd{row.storm_draw}_"
             f"src{row.source_id}_"
             f"var{row.variant_label}_"

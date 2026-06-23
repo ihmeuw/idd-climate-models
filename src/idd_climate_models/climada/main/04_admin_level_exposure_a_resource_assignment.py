@@ -24,18 +24,23 @@ Resource map version: v14
   - loc_id == 22 forced into "very_large" (29GB / 4 min) regardless of pixel count
 """
 
+import argparse
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from rra_tools.parallel import run_parallel  # type: ignore
 from rasterra import RasterArray  # type: ignore
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--admin_level", type=int, default=0, choices=[0, 1])
+args = parser.parse_args()
+ADMIN_LEVEL = args.admin_level
 
 # ----------------------------------------------------------------------
 # Constants
 # ----------------------------------------------------------------------
 CLIMADA_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada")
-SAVE_ROOT = CLIMADA_ROOT / "output" / "stage4a_metadata_admin0"
+SAVE_ROOT = CLIMADA_ROOT / "output" / f"stage4a_metadata_admin{ADMIN_LEVEL}"
 META_CSV = CLIMADA_ROOT / "input" / "cmip6" / "level_4_task_assignments.csv"
 
 DRAWS = list(range(100))
@@ -44,7 +49,9 @@ BASELINE_BATCH_YEAR = "1965-1969"  # historical baseline; excluded from stage 4
 PIXEL_SIZE_M = 100
 PIXEL_AREA_M2 = PIXEL_SIZE_M ** 2  # 100 m × 100 m = 10,000 m²
 
-LOC_ID_OVERRIDE_VERY_LARGE = 22  # forced to "very_large" regardless of n_pixels
+# loc_id 22 = India at admin0; empirically heavier than pixel count suggests.
+# Not applicable at admin1 (different location_id space).
+LOC_ID_OVERRIDE_VERY_LARGE = 22 if ADMIN_LEVEL == 0 else None
 
 COMPILED_PARQUET = SAVE_ROOT / "compiled_admin_level_metadata.parquet"
 OUTPUT_PARQUET = SAVE_ROOT / "resource_estimation_all_storms.parquet"
@@ -211,18 +218,19 @@ def assign_resources(meta_df: pd.DataFrame) -> pd.DataFrame:
     meta_df["memory_gb"] = meta_df["size_class"].map(mem_lookup).astype(int)
     meta_df["runtime_min"] = meta_df["size_class"].map(time_lookup).astype(int)
 
-    # loc_id override
-    loc_mask = meta_df["location_id"] == LOC_ID_OVERRIDE_VERY_LARGE
-    if loc_mask.any():
-        very_large = RESOURCE_MAP["very_large"]
-        print(
-            f"[INFO] Overriding {loc_mask.sum():,} loc_id="
-            f"{LOC_ID_OVERRIDE_VERY_LARGE} tasks → very_large "
-            f"({very_large['mem_gb']}GB/{very_large['runtime_min']}min)"
-        )
-        meta_df.loc[loc_mask, "memory_gb"] = very_large["mem_gb"]
-        meta_df.loc[loc_mask, "runtime_min"] = very_large["runtime_min"]
-        meta_df.loc[loc_mask, "size_class"] = "very_large"
+    # loc_id override (admin0 only)
+    if LOC_ID_OVERRIDE_VERY_LARGE is not None:
+        loc_mask = meta_df["location_id"] == LOC_ID_OVERRIDE_VERY_LARGE
+        if loc_mask.any():
+            very_large = RESOURCE_MAP["very_large"]
+            print(
+                f"[INFO] Overriding {loc_mask.sum():,} loc_id="
+                f"{LOC_ID_OVERRIDE_VERY_LARGE} tasks → very_large "
+                f"({very_large['mem_gb']}GB/{very_large['runtime_min']}min)"
+            )
+            meta_df.loc[loc_mask, "memory_gb"] = very_large["mem_gb"]
+            meta_df.loc[loc_mask, "runtime_min"] = very_large["runtime_min"]
+            meta_df.loc[loc_mask, "size_class"] = "very_large"
 
     # Defensive runtime ceiling (see RUNTIME_BINS comment for rationale).
     meta_df["runtime_min_binned"] = pd.cut(
@@ -262,13 +270,14 @@ def assign_resources(meta_df: pd.DataFrame) -> pd.DataFrame:
     print(launcher_df["runtime_min_binned"].value_counts().sort_index())
     print("\n=== Size class distribution ===")
     print(launcher_df["size_class"].value_counts().sort_index())
-    print(f"\n=== loc_id={LOC_ID_OVERRIDE_VERY_LARGE} override check ===")
-    loc_subset = launcher_df[launcher_df["location_id"] == LOC_ID_OVERRIDE_VERY_LARGE]
-    print(f"  Tasks:      {len(loc_subset):,}")
-    if not loc_subset.empty:
-        print(f"  Memory:     {loc_subset['memory_gb'].unique()}")
-        print(f"  Runtime:    {loc_subset['runtime_min_binned'].unique()}")
-        print(f"  Size class: {loc_subset['size_class'].unique()}")
+    if LOC_ID_OVERRIDE_VERY_LARGE is not None:
+        print(f"\n=== loc_id={LOC_ID_OVERRIDE_VERY_LARGE} override check ===")
+        loc_subset = launcher_df[launcher_df["location_id"] == LOC_ID_OVERRIDE_VERY_LARGE]
+        print(f"  Tasks:      {len(loc_subset):,}")
+        if not loc_subset.empty:
+            print(f"  Memory:     {loc_subset['memory_gb'].unique()}")
+            print(f"  Runtime:    {loc_subset['runtime_min_binned'].unique()}")
+            print(f"  Size class: {loc_subset['size_class'].unique()}")
 
     launcher_df.to_parquet(OUTPUT_PARQUET, index=False)
     print(f"\nSaved → {OUTPUT_PARQUET}")

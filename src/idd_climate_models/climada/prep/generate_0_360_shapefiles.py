@@ -18,12 +18,12 @@ from pathlib import Path
 import geopandas as gpd
 from shapely.geometry import MultiPolygon, Polygon, box
 from shapely.ops import unary_union
-
+import pandas as pd
 
 INPUT_ROOT = Path('/snfs1/WORK/11_geospatial/admin_shapefiles/2024_07_29')
 OUTPUT_ROOT = Path('/mnt/team/rapidresponse/pub/tropical-storms/data/global_shapefile')
 
-ADMIN_LEVELS = [0, 1, 2]
+ADMIN_LEVELS = [0, 1]
 SIMPLIFIED_SUFFIX = ''
 
 # Default writes alongside the existing canonical files with a "_0_360" suffix so
@@ -35,6 +35,14 @@ LEFT_BOX = box(-180, -90, 0, 90)
 RIGHT_BOX = box(0, -90, 180, 90)
 BUFFER = 1e-4
 
+FHS_LOC_PATH = Path("/mnt/team/rapidresponse/pub/tropical-storms/data/fhs_hierarchy_39_32.csv")
+
+def filter_to_fhs_admin1(gdf: gpd.GeoDataFrame, fhs_path: Path = FHS_LOC_PATH) -> gpd.GeoDataFrame:
+    """Filter a GeoDataFrame to only include admin1 regions present in the FHS hierarchy."""
+    fhs = pd.read_csv(fhs_path)
+    admin1_fhs_ids = fhs[fhs["level"] == 4]["location_id"].unique()
+    filtered_gdf = gdf[gdf["loc_id"].isin(admin1_fhs_ids)].copy()
+    return filtered_gdf
 
 def shift_left_piece(geom):
     """Shift a piece clipped to [-180, 0] into [180, 360].
@@ -116,6 +124,10 @@ def process_admin_level(admin_level: int) -> None:
 
     print(f"[admin {admin_level}] reading {shp_path}")
     gdf = gpd.read_file(shp_path)
+
+    if admin_level == 1:
+        print(f"[admin {admin_level}] filtering to FHS admin1 regions")
+        gdf = filter_to_fhs_admin1(gdf)
 
     print(f"[admin {admin_level}] reprojecting {len(gdf)} rows to 0-360")
     gdf['geometry'] = gdf['geometry'].apply(reproject_geometry)

@@ -16,7 +16,7 @@ fhs_hierarchy_2023 = fhs_hierarchy_2023[['location_set_id', 'location_id', 'pare
                          'location_name', 'location_name_short', 'location_type', 'map_id', 'super_region_id', 'super_region_name',
                          'region_id', 'region_name', 'ihme_loc_id', 'local_id', 'lancet_label']]
 
-location_ids = fhs_hierarchy_2023[fhs_hierarchy_2023['level'] <= 3]['location_id'].tolist()
+location_ids = fhs_hierarchy_2023[fhs_hierarchy_2023['level'] <= 4]['location_id'].tolist()
 # Get population
 all_population = get_population(
     age_group_id=22,

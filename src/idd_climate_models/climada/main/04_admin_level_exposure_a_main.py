@@ -42,25 +42,33 @@ parser.add_argument(
     "--group_id", type=int, required=True,
     help="Integer group_id; selects the subset of rows to process from the parquet",
 )
+parser.add_argument(
+    "--admin_level", type=int, required=False, default=0, choices=[0, 1],
+    help="Admin level (0 or 1)",
+)
 
 args = parser.parse_args()
 grouped_tasks_parquet = args.grouped_tasks_parquet
 group_id = args.group_id
-
-
+ADMIN_LEVEL = args.admin_level
 
 
 # Constants
-ADMIN_LEVEL = 0
 ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage1_v2")
-SAVE_ROOT = Path(f"/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage4a_metadata_admin{ADMIN_LEVEL}")
+SAVE_ROOT = Path(
+    f"/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage4a_metadata_admin{ADMIN_LEVEL}"
+)
 
 GDF_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/data/global_shapefile/")
 GRIDED_POP_PATH = Path("/mnt/team/rapidresponse/pub/population-model/results/2026_05_16/")
 POP_TOTALS_PATH = Path("/mnt/team/rapidresponse/pub/tropical-storms/fhs_population_2023_all_years.parquet")
 ANTIMERIDIAN = LineString([(180, -90), (180, 90)])
-SHP_ROOT_NORMALIZED_HIGHER = Path('/snfs1/WORK/11_geospatial/admin_shapefiles/2024_07_29')
-SHP_PATH_NORMALIZED_A0 = Path('/mnt/team/rapidresponse/pub/tropical-storms/data/global_shapefile/global_WGS84_admin0_normalized.parquet')
+SHP_PATH_NORMALIZED_A0 = Path(
+    "/mnt/team/rapidresponse/pub/tropical-storms/data/global_shapefile/global_WGS84_admin0_normalized.parquet"
+)
+SHP_PATH_NORMALIZED_A1 = Path(
+    "/mnt/team/rapidresponse/pub/tropical-storms/data/global_shapefile/global_WGS84_admin1_0_360.parquet"
+)
 
 
 
@@ -394,19 +402,20 @@ def get_exposure_storm_from_draw(
 #           Load Shapefile               #
 ##########################################
 
-def load_shapefiles(admin_level: int = 0):
-    file_name = f"global_WGS84_admin{admin_level}.parquet"
-    shapefile=gpd.read_parquet(GDF_ROOT / file_name)
-
-    return shapefile
+def load_shapefiles(admin_level: int = 0) -> gpd.GeoDataFrame:
+    if admin_level == 0:
+        return gpd.read_parquet(GDF_ROOT / "global_WGS84_admin0.parquet")
+    return gpd.read_parquet(GDF_ROOT / "global_WGS84_admin1_0_360.parquet")
 
 
 def load_shapefiles_normalized(admin_level: int = 0) -> gpd.GeoDataFrame:
-    """Load antimeridian-normalized admin shapes (parquet for admin 0, .shp otherwise)."""
+    """Load NA-basin admin shapes in -180..180 lon convention.
+    Admin0: pre-normalized parquet with special regions merged.
+    Admin1: FHS-filtered 0-360 parquet, normalized to -180..180 at load time."""
     if admin_level == 0:
         return gpd.read_parquet(SHP_PATH_NORMALIZED_A0)
-    shp_path = SHP_ROOT_NORMALIZED_HIGHER / f"lbd_standard_admin_{admin_level}.shp"
-    return gpd.read_file(shp_path)
+    gdf = gpd.read_parquet(SHP_PATH_NORMALIZED_A1)
+    return normalize_longitudes(gdf)
 ##########################################
 #           Load Population              #
 ##########################################

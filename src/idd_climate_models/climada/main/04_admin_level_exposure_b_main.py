@@ -39,23 +39,34 @@ parser.add_argument(
     "--group_id", type=int, required=True,
     help="Integer group_id; selects the subset of rows to process from the parquet",
 )
+parser.add_argument(
+    "--admin_level", type=int, required=False, default=0, choices=[0, 1],
+    help="Admin level (0 or 1)",
+)
 
 args = parser.parse_args()
 grouped_tasks_parquet = args.grouped_tasks_parquet
 group_id = args.group_id
-
-
+ADMIN_LEVEL = args.admin_level
 
 
 # Constants
 ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage1_v2")
-SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage4b_v2/")
-# SAVE_ROOT = Path("/mnt/share/scratch/users/mfiking/outputs/stage4_v2") # TEST
-
-GDF_PATH = Path("/mnt/team/rapidresponse/pub/tropical-storms/data/global_shapefile/global_WGS84_admin0.parquet")
 GRIDED_POP_PATH = Path("/mnt/team/rapidresponse/pub/population-model/results/2026_05_16/")
 POP_TOTALS_PATH = Path("/mnt/team/rapidresponse/pub/tropical-storms/fhs_population_2023_all_years.parquet")
-SHP_ROOT_NORMALIZED = Path('/mnt/team/rapidresponse/pub/tropical-storms/data/global_shapefile/global_WGS84_admin0_normalized.parquet')
+
+_SHP_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/data/global_shapefile")
+
+if ADMIN_LEVEL == 0:
+    SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage4b_v2/")
+    GDF_PATH = _SHP_ROOT / "global_WGS84_admin0.parquet"
+    SHP_ROOT_NORMALIZED = _SHP_ROOT / "global_WGS84_admin0_normalized.parquet"
+elif ADMIN_LEVEL == 1:
+    SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage4b_v2_admin1/")
+    GDF_PATH = _SHP_ROOT / "global_WGS84_admin1_0_360.parquet"
+    SHP_ROOT_NORMALIZED = _SHP_ROOT / "global_WGS84_admin1_0_360.parquet"
+else:
+    raise ValueError(f"admin_level must be 0 or 1, got {ADMIN_LEVEL!r}")
 
 # Antimeridian line — defined in WGS84
 ANTIMERIDIAN = shapely.geometry.LineString([(180, -90), (180, 90)])
@@ -417,17 +428,18 @@ def get_exposure_storm_from_draw(
 #           Load Shapefile               #
 ##########################################
 
-def load_shapefiles():
-    shapefile=gpd.read_parquet(GDF_PATH)
-
-    return shapefile
+def load_shapefiles() -> gpd.GeoDataFrame:
+    return gpd.read_parquet(GDF_PATH)
 
 
-def load_shapefiles_normalized(
-    shapefile_root: Path = SHP_ROOT_NORMALIZED,
-) -> gpd.GeoDataFrame:
-    """Load antimeridian-normalized admin 0 shapes from parquet."""
-    return gpd.read_parquet(shapefile_root)
+def load_shapefiles_normalized() -> gpd.GeoDataFrame:
+    """Load NA-basin admin shapes in -180..180 lon convention.
+    Admin0: pre-normalized parquet with special regions merged.
+    Admin1: FHS-filtered 0-360 parquet, normalized to -180..180 at load time."""
+    gdf = gpd.read_parquet(SHP_ROOT_NORMALIZED)
+    if ADMIN_LEVEL == 1:
+        gdf = normalize_longitudes(gdf)
+    return gdf
 ##########################################
 #           Load Population              #
 ##########################################
@@ -1245,6 +1257,20 @@ def process_single_storm(
     del storm_records
 
 
+def _write_sentinel(group_hash: str) -> None:
+    """Write a completion sentinel for this group. Called only after all tasks
+    in the group have been processed without raising an unhandled exception."""
+    sentinel_dir = SAVE_ROOT / "_sentinels"
+    sentinel_dir.mkdir(parents=True, exist_ok=True)
+    sentinel_path = sentinel_dir / f"{group_hash}.done"
+    sentinel_path.touch()
+    try:
+        import os
+        os.chmod(sentinel_path, 0o775)
+    except Exception:
+        pass
+
+
 def main(grouped_tasks_parquet: str, group_id: int) -> None:
     group_df = pd.read_parquet(grouped_tasks_parquet)
     group_df = group_df[group_df["group_id"] == group_id].reset_index(drop=True)
@@ -1254,23 +1280,12 @@ def main(grouped_tasks_parquet: str, group_id: int) -> None:
         return
 
     total = len(group_df)
-    print(f"Group {group_id}: {total} tasks total.")
+    group_hash = group_df["group_hash"].iloc[0]
+    print(f"Group {group_id} (hash={group_hash[:8]}…): {total} tasks.")
 
-    # 1. Check which tasks still need to run.
-    pending_rows = [
-        row for row in group_df.itertuples(index=False)
-        if not _is_task_complete(row)
-    ]
-    n_skipped = total - len(pending_rows)
-    print(
-        f"  {n_skipped} already complete (skipping), "
-        f"{len(pending_rows)} pending."
-    )
-
-    # 2. Run pending tasks serially.
-    for i, row in enumerate(pending_rows):
+    for i, row in enumerate(group_df.itertuples(index=False)):
         print(
-            f"  [{i + 1}/{len(pending_rows)}] "
+            f"  [{i + 1}/{total}] "
             f"storm={row.storm_id} loc={row.location_id} "
             f"draw={row.draw} basin={row.basin} batch={row.batch_year}"
         )
@@ -1285,6 +1300,12 @@ def main(grouped_tasks_parquet: str, group_id: int) -> None:
             location_id=row.location_id,
             num_cores=1,
         )
+
+    # Write sentinel only after all tasks complete without crashing.
+    # If the worker crashes mid-group, no sentinel is written and the group
+    # is resubmitted on the next launcher run.
+    _write_sentinel(group_hash)
+    print(f"  ✅ Group {group_id} complete — sentinel written.")
 
 
 main(grouped_tasks_parquet, group_id)

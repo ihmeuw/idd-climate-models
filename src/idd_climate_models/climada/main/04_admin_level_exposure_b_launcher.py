@@ -1,16 +1,53 @@
+import hashlib
 import uuid
 import numpy as np
 import pandas as pd  # type: ignore
 from jobmon.client.tool import Tool  # type: ignore
 from pathlib import Path
 
+# ── Admin level ───────────────────────────────────────────────────────────────
+# Set to 0 or 1. Controls which resource parquet, output root, and
+# --admin_level flag passed to the main and post-processing scripts.
+ADMIN_LEVEL = 1
 
-SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage4b_v2/")
-MAX_GROUP_RUNTIME_MIN = 360 # 6 hours per group is a reasonable balance of SLURM efficiency vs. risk of mid-run failures.
-GROUPED_PARQUET_DIR = Path(
-    "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage4a_metadata_admin0"
-    "/_workflow_grouped_tasks_4b"
+# ── Completion check ──────────────────────────────────────────────────────────
+# True  — skip groups that already have a sentinel on disk (normal resume).
+# False — submit all groups; workers overwrite outputs (fresh run / NFS issues).
+CHECK_COMPLETION = True
+
+# ── Resource multipliers ──────────────────────────────────────────────────────
+# Applied AFTER group assignment and sentinel check so group composition (and
+# therefore sentinel hashes) stays identical regardless of multiplier value.
+# Set to 1 for normal runs; 2 to double memory/runtime for retry runs.
+MEMORY_MULTIPLIER = 2
+RUNTIME_MULTIPLIER = 1
+
+CLIMADA_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output")
+SAVE_ROOT = CLIMADA_ROOT / f"stage4b_v2{'_admin1' if ADMIN_LEVEL == 1 else ''}/"
+SENTINEL_DIR = SAVE_ROOT / "_sentinels"
+MAX_GROUP_RUNTIME_MIN = 360
+GROUPED_PARQUET_DIR = (
+    CLIMADA_ROOT / f"stage4a_metadata_admin{ADMIN_LEVEL}" / "_workflow_grouped_tasks_4b"
 )
+
+_GROUP_KEY_COLS = [
+    "source_id", "variant_label", "experiment_id",
+    "batch_year", "basin", "draw", "storm_id", "location_id",
+]
+
+
+def _group_hash(group_df: pd.DataFrame) -> str:
+    """Stable MD5 hash of a group's sorted task keys. Same tasks → same hash
+    across workflow runs, enabling sentinel-based resume."""
+    keys = sorted(group_df[_GROUP_KEY_COLS].itertuples(index=False, name=None))
+    return hashlib.md5(str(keys).encode()).hexdigest()
+
+
+def _load_completed_hashes() -> set[str]:
+    """Return the set of group hashes that already have a sentinel on disk."""
+    if not SENTINEL_DIR.exists():
+        return set()
+    return {p.stem for p in SENTINEL_DIR.glob("*.done")}
 
 
 def assign_groups(
@@ -55,8 +92,7 @@ def assign_groups(
 
 # Read resource parquet — keep integer columns numeric for grouping.
 meta_df = pd.read_parquet(
-    "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/"
-    "stage4a_metadata_admin0/resource_estimation_all_storms.parquet"
+    CLIMADA_ROOT / f"stage4a_metadata_admin{ADMIN_LEVEL}" / "resource_estimation_all_storms.parquet"
 )
 
 meta_df["basin"] = meta_df["basin"].fillna("NA")
@@ -73,10 +109,11 @@ POST_PROCESSING_SCRIPT = (
     Path(__file__).resolve().parent / "04_admin_level_exposure_b_post_processing.py"
 )
 
-tool = Tool(name="CLIMADA_stage4")
+tool = Tool(name=f"CLIMADA_stage4b_admin{ADMIN_LEVEL}")
 
 workflow = tool.create_workflow(
-    name=f"CLIMADA_stage4_{wf_uuid}",
+    name=f"CLIMADA_stage4b_admin{ADMIN_LEVEL}_{wf_uuid}",
+    max_concurrently_running=2500,
 )
 
 workflow.set_default_compute_resources_from_dict(
@@ -92,11 +129,33 @@ workflow.set_default_compute_resources_from_dict(
 )
 
 
-# --- Group assignment and per-group task creation ---
-# No launcher-level completion scan: each worker's main() checks _is_task_complete
-# per row and skips already-done tasks. This avoids an O(n_files) NFS walk that
-# becomes prohibitively slow once millions of output files exist.
+# --- Group assignment ---
 meta_df = assign_groups(meta_df, MAX_GROUP_RUNTIME_MIN)
+
+# Compute stable hash per group and embed it in the DataFrame so workers
+# can write their sentinel without recomputing it.
+meta_df["group_hash"] = (
+    meta_df.groupby("group_id", group_keys=False)
+    .apply(lambda g: pd.Series(_group_hash(g), index=g.index))
+)
+
+############################################################################################
+# Sentinel-based completion scan.
+# Each completed group writes a tiny {hash}.done file to SENTINEL_DIR.
+# Checking N_groups sentinel files is O(thousands) vs O(millions) for output walks.
+# CHECK_COMPLETION=False: skip the check entirely — workers overwrite outputs
+# (idempotent) and write new sentinels. Use for fresh runs or NFS latency issues.
+if CHECK_COMPLETION:
+    completed_hashes = _load_completed_hashes()
+    before = meta_df["group_id"].nunique()
+    meta_df = meta_df[~meta_df["group_hash"].isin(completed_hashes)].reset_index(drop=True)
+    remaining_groups = meta_df["group_id"].nunique()
+    print(
+        f"Sentinel check: {before - remaining_groups} / {before} groups already done; "
+        f"{remaining_groups} groups to submit."
+    )
+else:
+    print("Sentinel check skipped — all groups will be submitted.")
 
 GROUPED_PARQUET_DIR.mkdir(parents=True, exist_ok=True)
 grouped_parquet_path = GROUPED_PARQUET_DIR / f"grouped_tasks_{wf_uuid}.parquet"
@@ -115,6 +174,9 @@ group_meta = (
         n_tasks=("storm_id", "count"),
     )
 )
+# Apply multipliers after group assignment so group hashes are unaffected.
+group_meta["memory_gb"] = (group_meta["memory_gb"] * MEMORY_MULTIPLIER).astype(int)
+group_meta["total_runtime_min"] = group_meta["total_runtime_min"] * RUNTIME_MULTIPLIER
 group_meta["runtime_slot_min"] = (
     (np.ceil(group_meta["total_runtime_min"] / 10) * 10)
     .astype(int)
@@ -122,6 +184,8 @@ group_meta["runtime_slot_min"] = (
 )
 group_meta["memory_str"] = group_meta["memory_gb"].astype(str) + "G"
 group_meta["runtime_str"] = group_meta["runtime_slot_min"].astype(str) + "m"
+if MEMORY_MULTIPLIER != 1 or RUNTIME_MULTIPLIER != 1:
+    print(f"Resource multipliers applied: memory ×{MEMORY_MULTIPLIER}, runtime ×{RUNTIME_MULTIPLIER}")
 
 print(
     f"\nGroup summary: {len(group_meta):,} groups from {len(meta_df):,} tasks "
@@ -142,7 +206,7 @@ task_templates: dict = {}
 for _, config in unique_configs.iterrows():
     config_key = f"{config['runtime_str']}_1_{config['memory_str']}"
     task_templates[config_key] = tool.get_task_template(
-        template_name=f"CLIMADA_stage4_{config_key}",
+        template_name=f"CLIMADA_stage4b_admin{ADMIN_LEVEL}_{config_key}",
         default_cluster_name="slurm",
         default_compute_resources={
             "queue": "all.q",
@@ -159,7 +223,8 @@ for _, config in unique_configs.iterrows():
         command_template=(
             f"python {MAIN_SCRIPT} "
             f"--grouped_tasks_parquet {grouped_parquet_path} "
-            "--group_id {group_id}"
+            "--group_id {group_id} "
+            f"--admin_level {ADMIN_LEVEL}"
         ),
         node_args=["group_id"],
     )
@@ -168,7 +233,7 @@ for _, config in unique_configs.iterrows():
 for _, grp in group_meta.iterrows():
     config_key = f"{grp['runtime_str']}_1_{grp['memory_str']}"
     task = task_templates[config_key].create_task(
-        name=f"CLIMADA_stage4_group_{int(grp['group_id'])}",
+        name=f"CLIMADA_stage4b_admin{ADMIN_LEVEL}_group_{int(grp['group_id'])}",
         group_id=int(grp["group_id"]),
     )
     tasks.append(task)
@@ -182,11 +247,11 @@ print(f"Number of task templates created: {len(task_templates)}")
 # per-(storm × loc) parquet, and writes one consolidated parquet.
 # Depends on every per-group task so it only fires once 4B is done.
 post_processing_template = tool.get_task_template(
-    template_name="CLIMADA_stage4b_post_processing",
+    template_name=f"CLIMADA_stage4b_admin{ADMIN_LEVEL}_post_processing",
     default_cluster_name="slurm",
     default_compute_resources={
         "queue": "all.q",
-        "cores": 20,
+        "cores": 40,
         "memory": "100G",
         "runtime": "240m",
         "project": project,
@@ -196,12 +261,15 @@ post_processing_template = tool.get_task_template(
         "runtime": 2.0,
     },
     max_attempts=2,
-    command_template=f"python {POST_PROCESSING_SCRIPT}",
+    command_template=(
+        f"python {POST_PROCESSING_SCRIPT} "
+        f"--admin_level {ADMIN_LEVEL}"
+    ),
     node_args=[],
 )
 
 post_processing_task = post_processing_template.create_task(
-    name="CLIMADA_stage4b_post_processing",
+    name=f"CLIMADA_stage4b_admin{ADMIN_LEVEL}_post_processing",
     upstream_tasks=tasks,
 )
 

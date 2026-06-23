@@ -1,58 +1,40 @@
-from pathlib import Path
-import numpy as np  # type: ignore
 import os
-import rasterra as rt  # type: ignore
-import pandas as pd  # type: ignore
-from rasterio.features import shapes  # type: ignore
-from rasterio.errors import WindowError  # type: ignore
-import geopandas as gpd  # type: ignore
 import argparse
 import traceback
+from pathlib import Path
+
+import xarray as xr  # type: ignore
+import numpy as np  # type: ignore
+import pandas as pd  # type: ignore
+import geopandas as gpd  # type: ignore
+import rasterra as rt  # type: ignore
+import rasterio  # type: ignore
+import shapely
+
+from rasterio.features import shapes  # type: ignore
 from rra_tools.parallel import run_parallel  # type: ignore
-import shapely  # type: ignore
-from shapely.geometry import (
-    box,
-    shape,
-    Polygon,
-    MultiPolygon,
-    GeometryCollection,
-    LineString,
-)  # type: ignore
-from shapely.ops import split, unary_union  # type: ignore
+from shapely.geometry import box, shape, Polygon, MultiPolygon, GeometryCollection, LineString
+from shapely.ops import split, unary_union
 import pyarrow.parquet as pq  # type: ignore
 from rasterra import RasterArray  # type: ignore
 
 parser = argparse.ArgumentParser(description="Run CLIMADA code")
 
 # Define arguments
-parser.add_argument("--storm_draw", type=str, required=True, help="Storm Draw")
-parser.add_argument("--source_id", type=str, required=True, help="Source Id")
-parser.add_argument("--variant_label", type=str, required=True, help="Variant Label")
-parser.add_argument("--experiment_id", type=str, required=True, help="Experiment Id")
-parser.add_argument("--batch_year", type=str, required=True, help="Batch Year")
+parser.add_argument("--year", type=str, required=True, help="Year")
 parser.add_argument("--basin", type=str, required=True, help="Basin")
 parser.add_argument("--relative_risk", type=str, required=True, help="Relative risk type")
-parser.add_argument("--sample_name", type=str, required=True, help="Sample name for relative risk")
-parser.add_argument("--num_cores", type=int, required=True, help="Number of cores to use for parallel processing")
 parser.add_argument("--admin_level", type=int, required=False, default=0, choices=[0, 1], help="Admin level (0 or 1)")
-
 
 # Parse arguments
 args = parser.parse_args()
-storm_draw = args.storm_draw
-source_id = args.source_id
-variant_label = args.variant_label
-experiment_id = args.experiment_id
-batch_year = args.batch_year
+year = args.year
 basin = args.basin
 relative_risk = args.relative_risk
-sample_name = args.sample_name
-num_cores = args.num_cores
 admin_level = args.admin_level
 
-
 # Constants
-PAF_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage2_v2/")
+PAF_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/ibtracs_stage2/")
 GRIDED_POP_PATH = Path("/mnt/team/rapidresponse/pub/population-model/results/2026_05_16/")
 POP_TOTALS_PATH = Path("/mnt/team/rapidresponse/pub/tropical-storms/fhs_population_2023_all_years.parquet")
 ANTIMERIDIAN = LineString([(180, -90), (180, 90)])
@@ -60,24 +42,26 @@ ANTIMERIDIAN = LineString([(180, -90), (180, 90)])
 _SHP_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/data/global_shapefile")
 
 if admin_level == 0:
-    SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage3_v2/")
+    SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/ibtracs_stage3/")
     GDF_PATH = _SHP_ROOT / "global_WGS84_admin0.parquet"
     SHP_ROOT_NORMALIZED = _SHP_ROOT / "global_WGS84_admin0_normalized.parquet"
 elif admin_level == 1:
-    SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage3_v2_admin1/")
+    SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/ibtracs_stage3_admin1/")
     GDF_PATH = _SHP_ROOT / "global_WGS84_admin1_0_360.parquet"
-    # admin1 is already FHS-filtered so no special-region merging is needed.
-    # For NA basin the 0-360 file is normalized to -180..180 at load time.
     SHP_ROOT_NORMALIZED = _SHP_ROOT / "global_WGS84_admin1_0_360.parquet"
 else:
     raise ValueError(f"admin_level must be 0 or 1, got {admin_level!r}")
 
+SOURCE_ID = "ibtracs"
+VARIANT_LABEL = "official"
+EXPERIMENT_ID = "historical"
+SAMPLE_NAME = "mean"
 ##############################
 #     Helper Functions       #
 ##############################
 def normalize_geom_to_0_360(geom):
     """Shift WGS84 geometry from -180–180 to 0–360 for clipping against 0–360 raster."""
-    def shift_x(x, y, _z=None):
+    def shift_x(x, y, z=None):
         return x + 360 if x < 0 else x, y
     return shapely.ops.transform(shift_x, geom)
 
@@ -93,6 +77,13 @@ def normalize_longitudes(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     gdf = gdf.copy()
     gdf["geometry"] = gdf["geometry"].apply(shift_geom)
     return gdf
+
+def normalize_dataset(ds: xr.Dataset) -> xr.Dataset:
+    ds = ds.assign_coords(
+        lon=(((ds.lon + 180) % 360) - 180)
+    ).sortby("lon")
+
+    return ds
 
 def subset_affected_area(
     rr_raster: rt.RasterArray,
@@ -126,7 +117,7 @@ def subset_affected_area(
     rows, cols = np.where(mask)
 
     transform = rr_raster.transform
-    a, _b, c, _d, e, f = transform[:6]
+    a, b, c, d, e, f = transform[:6]
 
     # Pixel → coordinate conversion
     xmin = c + cols.min() * a
@@ -153,30 +144,25 @@ def reproject_shapefile_to_equal_area(intersected_shapes):
     intersected_shapes["geometry"] = intersected_shapes.geometry.apply(_polygonize)
     return intersected_shapes
 
-
 ##############################
 #     Load Raw PAF Raster    #
 ##############################
 def load_raw_paf_raster(
-    storm_draw: str,
     source_id: str,
     variant_label: str,
-    sample_name: str,
     relative_risk: str,
     experiment_id: str,
-    batch_year: str,
+    year: str | int,
     basin: str,
-    year: int,
     metric: str = "raw_paf",
     paf_root: Path = PAF_ROOT,
 ):
     year = str(year)
-    root_dir = paf_root / storm_draw / source_id / variant_label / experiment_id / batch_year / year / basin / metric
-    start_year, end_year = batch_year.split("-")
+    root_dir = paf_root / source_id / variant_label / experiment_id  / year / basin / metric
 
     filename = (
-        f"draw_mean_{metric}_{storm_draw}_{relative_risk}_{sample_name}_{basin}_{source_id}_"
-        f"{experiment_id}_{variant_label}_{start_year}01_{end_year}12_{year}.tif"
+        f"draw_mean_{metric}_{relative_risk}_{basin}_{source_id}_"
+        f"{experiment_id}_{variant_label}_{year}.tif"
     )
 
     paf_path = root_dir / filename
@@ -211,13 +197,14 @@ def load_shapefiles():
 def load_shapefiles_normalized(
     shapefile_root: Path = SHP_ROOT_NORMALIZED,
 ) -> gpd.GeoDataFrame:
-    """Load NA-basin admin shapes. For admin0 this is a pre-normalized parquet
-    (-180..180, special regions merged). For admin1 the 0-360 parquet is used
-    and lon-normalized here so it matches the NA PAF raster convention."""
+    """Load NA-basin admin shapes in -180..180 lon convention.
+    Admin0: pre-normalized parquet with special regions merged.
+    Admin1: FHS-filtered 0-360 parquet, normalized to -180..180 at load time."""
     gdf = gpd.read_parquet(shapefile_root)
     if admin_level == 1:
         gdf = normalize_longitudes(gdf)
     return gdf
+
 ##########################################
 #           Load Population              #
 ##########################################
@@ -226,13 +213,11 @@ def load_population_dataframe():
 
     return pop_df
 
-def get_population_total(pop_df: pd.DataFrame, year: int, admin_id: int):
+def get_population_total(pop_df: pd.DataFrame, year: int | str, admin_id: int):
 
     subset = pop_df[
-        (pop_df["year_id"] == year) &
-        (pop_df["location_id"] == admin_id) &
-        (pop_df["age_group_id"] == 22) &
-        (pop_df["sex_id"] == 3)
+        (pop_df["year_id"] == int(year)) &
+        (pop_df["location_id"] == admin_id)
     ]
 
     if subset.empty:
@@ -375,14 +360,12 @@ def intersect_shapefile_with_raster(
 ##########################################
 def save_batch_paf_dataframe(
     paf_df: pd.DataFrame,
-    storm_draw: str,
     source_id: str,
     variant_label: str,
     sample_name: str,
     relative_risk: str,
     experiment_id: str,
-    batch_year: str,
-    year: int,
+    year: str | int,
     basin: str,
     save_root: Path = SAVE_ROOT,
 ):
@@ -398,21 +381,17 @@ def save_batch_paf_dataframe(
     year = str(year)
     save_dir = (
         save_root
-        / storm_draw
         / source_id
         / variant_label
         / experiment_id
-        / batch_year
-        / basin
         / year
+        / basin
         / "paf_df"
     )
     save_dir.mkdir(parents=True, exist_ok=True)
 
 
-    start_year, end_year = batch_year.split("-")
-
-    filename = f"paf_{storm_draw}_{relative_risk}_{sample_name}_{basin}_{source_id}_{experiment_id}_{variant_label}_{start_year}01_{end_year}12_{year}.parquet"
+    filename = f"paf_{relative_risk}_{sample_name}_{basin}_{source_id}_{experiment_id}_{variant_label}_{year}.parquet"
     save_path = save_dir / filename
 
     # Optional: enforce consistent column order
@@ -428,16 +407,9 @@ def save_batch_paf_dataframe(
     paf_df = paf_df[existing_cols + other_cols]
 
     paf_df.to_parquet(save_path, index=False)
+    os.chmod(save_path, 0o775)
+    os.chmod(save_dir, 0o775)
     print(f"Saved batch-year PAF dataframe: {save_path}")
-
-    # Set permissions on the file we just wrote and its parent so the group
-    # can read + traverse. Wrapped because a chmod failure shouldn't
-    # invalidate a successful parquet write.
-    try:
-        os.chmod(save_path, 0o775)
-        os.chmod(save_path.parent, 0o775)
-    except Exception as e:
-        print(f"⚠️ Could not set permissions for {save_path}: {e}")
 
 
 def check_if_year_complete(
@@ -541,36 +513,39 @@ def split_antimeridian_geom(geom_cea):
 
     return out_cea, out_wgs84
 
+def check_if_raw_paf_exists(
+    source_id: str,
+    variant_label: str,
+    relative_risk: str,
+    experiment_id: str,
+    year: str | int,
+    basin: str,
+    paf_root: Path = PAF_ROOT,
+) -> bool:
+    try:
+        load_raw_paf_raster(
+            source_id=source_id,
+            variant_label=variant_label,
+            relative_risk=relative_risk,
+            experiment_id=experiment_id,
+            year=year,
+            basin=basin,
+            paf_root=paf_root,
+        )
+        return True
+    except FileNotFoundError:
+        return False
+
 ##########################################
 #            MAIN FUNCTION               #
 ##########################################
-def process_single_year(args):
-    (
-        storm_draw,
-        source_id,
-        variant_label,
-        experiment_id,
-        batch_year,
-        year,
-        basin,
-        relative_risk,
-        sample_name,
-    ) = args
-
-    # ---- skip if already complete ----
-    if check_if_year_complete(
-        storm_draw,
-        source_id,
-        variant_label,
-        sample_name,
-        relative_risk,
-        experiment_id,
-        batch_year,
-        year,
-        basin,
-    ):
-        print(f"Skipping year {year} (already complete)")
-        return
+# import time
+def process_single_year(
+    year: str | int,
+    basin: str,
+    relative_risk: str,
+    sample_name: str = SAMPLE_NAME,
+):
 
     # load shapefile and population once per year
     if basin == "NA":
@@ -580,18 +555,27 @@ def process_single_year(args):
     pop_df = load_population_dataframe()
     paf_records = []
 
+    # check if raw PAF raster exists before proceeding
+    if not check_if_raw_paf_exists(
+        source_id=SOURCE_ID,
+        variant_label=VARIANT_LABEL,
+        relative_risk=relative_risk,
+        experiment_id=EXPERIMENT_ID,
+        year=year,
+        basin=basin,
+    ):
+        print(f"Raw PAF raster not found for year {year}, basin {basin}. Skipping.")
+        return
+    
     # load and clean PAF raster once
     raw_paf_raster = clean_paf_raster(
         load_raw_paf_raster(
-            storm_draw=storm_draw,
-            source_id=source_id,
-            variant_label=variant_label,
-            sample_name=sample_name,
+            source_id=SOURCE_ID,
+            variant_label=VARIANT_LABEL,
             relative_risk=relative_risk,
-            experiment_id=experiment_id,
-            batch_year=batch_year,
-            basin=basin,
+            experiment_id=EXPERIMENT_ID,
             year=year,
+            basin=basin,
         )
     )
 
@@ -604,7 +588,6 @@ def process_single_year(args):
 
     if len(intersected_shapes) == 0:
         print(f"No intersected shapes for year {year}, basin {basin}. Skipping.")
-        del raw_paf_raster, pop_df, shapefile
         return
 
     # Reproject once
@@ -613,11 +596,11 @@ def process_single_year(args):
     print(f"Processing year {year} with {len(intersected_shapes)} intersected shapes")
 
     for admin_shape in intersected_shapes.itertuples(index=False):
+        admin_geom = admin_shape.geometry
+        admin_id = admin_shape.loc_id
 
-        admin_id = getattr(admin_shape, "loc_id", None)
+        # Per-admin try/except so one bad polygon doesn't kill the year.
         try:
-            admin_geom = admin_shape.geometry
-
             # split if crossing antimeridian
             geom_pieces_cea, geom_pieces_wgs84 = split_antimeridian_geom(admin_geom)
             if not geom_pieces_cea:
@@ -659,8 +642,7 @@ def process_single_year(args):
 
                 try:
                     pop_piece_masked = pop_piece.mask(piece_cea, all_touched=True)
-                    del pop_piece
-                except WindowError:
+                except rasterio.errors.WindowError:
                     print("[INFO] Admin piece does not intersect raster → skipping piece")
                     continue
 
@@ -674,8 +656,6 @@ def process_single_year(args):
                     ._ndarray.astype(np.float32, copy=False)
                 )
 
-                del paf_piece, pop_piece_masked
-
                 # ----------------------------
                 # Valid cells
                 # ----------------------------
@@ -684,9 +664,6 @@ def process_single_year(args):
                 if valid_mask.any():
                     numerator_total += (pop_arr[valid_mask] * paf_arr[valid_mask]).sum()
                     population_exposed_total += pop_arr[valid_mask].sum()
-
-                # clean arrays
-                del pop_arr, paf_arr, valid_mask
 
             # ----------------------------
             # Population denominator
@@ -705,7 +682,6 @@ def process_single_year(args):
                 population_exposed = population_exposed_total
 
             paf_records.append({
-                "storm_draw": storm_draw,
                 "location_id": admin_id,
                 "year": year,
                 "total_population": float(pop_sum),
@@ -714,93 +690,36 @@ def process_single_year(args):
                 "relative_risk": relative_risk,
                 "special_region_flag": special_region_flag,
             })
-
-            # explicitly clean per admin
-            del numerator_total, population_exposed_total, geom_pieces_cea, geom_pieces_wgs84, admin_geom
         except Exception as e:
             print(
-                f"❌ Admin {admin_id} failed in year {year} "
-                f"({storm_draw}/{source_id}/{variant_label}/{experiment_id}/"
-                f"{batch_year}/{basin}): {type(e).__name__}: {e}"
+                f"❌ Admin {admin_id} failed in basin {basin}, year {year}: "
+                f"{type(e).__name__}: {e}"
             )
             traceback.print_exc()
             continue
 
-    # ----------------------------
-    # Final cleanup
-    # ----------------------------
-    del raw_paf_raster, intersected_shapes, shapefile, pop_df
-
     final_paf_df = (
         pd.DataFrame.from_records(paf_records)
-        .sort_values(["storm_draw", "location_id", "year"])
+        .sort_values(["location_id", "year"])
         .reset_index(drop=True)
     )
 
     save_batch_paf_dataframe(
-        final_paf_df,
-        storm_draw,
-        source_id,
-        variant_label,
-        sample_name,
-        relative_risk,
-        experiment_id,
-        batch_year,
-        year,
-        basin,
+        paf_df=final_paf_df,
+        source_id=SOURCE_ID,
+        variant_label=VARIANT_LABEL,
+        sample_name=sample_name,
+        relative_risk=relative_risk,
+        experiment_id=EXPERIMENT_ID,
+        year=year,
+        basin=basin,
+        save_root=SAVE_ROOT,
     )
 
-    del paf_records, final_paf_df
-
-def main(
-    storm_draw: str,
-    source_id: str,
-    variant_label: str,
-    experiment_id: str,
-    batch_year: str,
-    basin: str,
-    relative_risk: str,
-    sample_name: str,
-    num_cores: int,
-    save_root: Path = SAVE_ROOT,
-):
-    start_year, end_year = batch_year.split("-")
-    start_year = int(start_year)
-    end_year = int(end_year)
-
-    years = list(range(start_year, end_year + 1))
-    year_args = [
-        (
-            storm_draw,
-            source_id,
-            variant_label,
-            experiment_id,
-            batch_year,
-            year,
-            basin,
-            relative_risk,
-            sample_name,
-        )
-        for year in years
-    ]
-
-    run_parallel(
-        runner=process_single_year,
-        arg_list=year_args,
-        num_cores=num_cores,   # tune based on memory
-        progress_bar=True,
-    )
-    print(f"parallel tasks done")
 
 
-main(
-    storm_draw=storm_draw,
-    source_id=source_id,
-    variant_label=variant_label,
-    experiment_id=experiment_id,
-    batch_year=batch_year,
+process_single_year(
+    year=year,
     basin=basin,
     relative_risk=relative_risk,
-    sample_name=sample_name,
-    num_cores=num_cores,
 )
