@@ -22,9 +22,24 @@ Raw climate data → TC risk models → CLIMADA impact assessment.
 
 ## Environment
 
+This repo uses the fleet-standard pure-uv scheme: a project `.venv` at the
+repo root on a uv-managed CPython 3.12, with all dependencies declared in
+`pyproject.toml` / `uv.lock`. No conda.
+
 ```bash
-source /ihme/homes/bcreiner/miniconda/etc/profile.d/conda.sh && conda activate idd-climate-models
+cd <repo>
+uv venv --python 3.12        # .venv on the managed CPython
+uv sync --all-extras         # exact sync from uv.lock; dev group included
+.venv/bin/python -m ipykernel install --user --name idd-climate-models \
+    --display-name "idd-climate-models (.venv)"
 ```
+
+- Run code via `.venv/bin/python` — by absolute path in Slurm/jobmon task
+  commands (no activation required); `source .venv/bin/activate` is an
+  optional interactive convenience.
+- Day-to-day dependency updates: `uv sync --inexact`. Clean rebuilds: plain
+  `uv sync` (vet first with `uv sync --dry-run`). Never `pip install` into
+  the .venv — declare the dep in `pyproject.toml` instead.
 
 ---
 

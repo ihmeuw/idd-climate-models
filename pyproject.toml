@@ -3,32 +3,74 @@ name = "idd-climate-models"
 version = "0.1.0"
 description = ""
 authors = [
-    {name = "Bobby Reiner",email = "bcreiner@uw.edu"}
+    {name = "Bobby Reiner", email = "bcreiner@uw.edu"}
 ]
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12,<4"
 dependencies = [
-    "pandas (>=2.3.3,<3.0.0)",
-    "numpy (>=2.3.4,<3.0.0)",
-    "scipy (>=1.16.3,<2.0.0)",
-    "matplotlib (>=3.10.7,<4.0.0)",
-    "seaborn (>=0.13.2,<0.14.0)",
-    "plotly (>=6.3.1,<7.0.0)",
-    "jupyter (>=1.1.1,<2.0.0)",
-    "notebook (>=7.4.7,<8.0.0)",
-    "ipykernel (>=7.1.0,<8.0.0)",
-    "xarray (>=2025.10.1,<2026.0.0)",
-    "netcdf4 (>=1.7.3,<2.0.0)",
-    "global-land-mask (>=1.0.0,<2.0.0)",
-    "cfgrib (>=0.9.15.1,<0.10.0.0)",
-    "cftime (>=1.6.5,<2.0.0)",
-    "cartopy (>=0.25.0,<0.26.0)",
-    "dask (>=2025.11.0,<2026.0.0)",
-    "distributed (>=2025.11.0,<2026.0.0)",
-    "filelock (>=3.13.0,<4.0.0)"
+    "pandas>=2.3.3",
+    "numpy>=2.3.4",
+    "scipy>=1.16.3",
+    "matplotlib>=3.10.7",
+    "seaborn>=0.13.2",
+    "plotly>=6.3.1",
+    "jupyter>=1.1.1",
+    "notebook>=7.4.7",
+    "xarray>=2025.10.1",
+    "netcdf4>=1.7.3",
+    "global-land-mask>=1.0.0",
+    "cfgrib>=0.9.15.1",
+    # ECMWF binary-library wheel: provides libeccodes for the eccodes python
+    # bindings (the old conda env carried it; eccodes alone does not pull it).
+    "eccodeslib>=2.44",
+    "cftime>=1.6.5",
+    "cartopy>=0.25.0",
+    "dask>=2025.11.0",
+    "distributed>=2025.11.0",
+    "filelock>=3.13.0",
+    # Previously undeclared but imported by src/ (satisfied ad hoc by the old
+    # conda env) — declared during the 2026-08-09 fleet venv conversion.
+    "statsmodels>=0.14",
+    "shapely>=2.1",
+    "scikit-learn>=1.8",
+    "geopandas>=0.14",
+    "xgboost>=3.2",
+    "tqdm>=4.67",
+    # Cluster-only leaf pipeline: jobmon is a core dep (fleet pin).
+    "jobmon_installer_ihme==10.12.2",
 ]
 
+[project.optional-dependencies]
+# 99_climada / tc_estimation stage deps. climada itself is EXCLUDED
+# (dependency smashing): under this repo's numpy>=2.3.4 floor the resolver
+# falls back to numba 0.53.1 / llvmlite 0.36.0, which cannot build on
+# Python 3.12 (modern numba caps numpy below our floor). climada was also
+# never installed in the old conda env, so no working setup is lost.
+climada = ["rasterra>=0.6.3"]
+# Imported only by notebooks/ (idd-spatial-analysis is the editable sibling
+# repo the old conda env carried ad hoc).
+notebooks = ["ruptures>=1.1", "rasterio>=1.4", "affine>=2.4", "idd-spatial-analysis"]
+# Vendored tc_risk ERA5 download scripts only (was never installed in the old env).
+downloads = ["cdsapi>=0.7"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ipykernel>=7",
+]
+
+# IHME-internal artifactory — required for jobmon_installer_ihme and its
+# internal-only TRANSITIVE deps. NOT explicit: uv source pins cover direct
+# deps only, so explicit = true would strand the transitives. As a
+# non-explicit index uv consults ihme before default PyPI.
+[[tool.uv.index]]
+name = "ihme"
+url = "https://artifactory.ihme.washington.edu/artifactory/api/pypi/pypi-shared/simple"
+
+[tool.uv.sources]
+jobmon_installer_ihme = { index = "ihme" }
+idd-spatial-analysis = { path = "../idd-spatial-analysis", editable = true }
 
 [build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
