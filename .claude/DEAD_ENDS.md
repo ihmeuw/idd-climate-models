@@ -27,3 +27,8 @@
 **What I tried:** Rewrote predict_df and predict_df_oos to predict in rate space (exposure=1 for GLMs, clip bulk to (0,u], clip tail to [u,∞)), then assemble as pred_rate = s1*((1-s2)*bulk_rate + s2*tail_rate) and convert to counts via pred_count = pred_rate * exp_all.
 **Why I stopped:** Assembled insample pred/obs ratio came out at 4.56 (1.5M predicted vs 330K observed). Stage-level bulk (1.41) and tail (0.79) ratios look plausible. Rates are confirmed < 1. Root cause of inflated assembly not identified before session ended.
 **Refs:** `src/idd_climate_models/tc_models/stage_plots.py` predict_df method; `notebooks/tc_models/predict_df_demo.ipynb`
+
+## 2026-09-23: Search for a pre-underscore "OG" central-pressure estimator
+**What I tried:** Looked for an earlier version of the pressure estimation code (a bare `estimate_pressure`, CLIMADA-only default) across all git refs, orphaned commits and the reflog, VS Code local history (482 saved files for this repo), the home directory, the tropical-storms model root, the CLIMADA clone and stale `.pyc` files.
+**Why I stopped:** Nothing predates the 2025-10-28 scripts in `~/repos/climada_python/notebooks`, which already carry `_estimate_pressure` (CLIMADA's own spelling), the 0.6/0.4 blend and `use_ensemble=True`. Claude Code transcripts from Nov 2025 were purged by the 30-day retention default. Unsearched: GitHub (idd-manuscripts, never-fetched branches), laptop, claude.ai web history.
+**Refs:** `src/idd_climate_models/tc_estimation.py`, `add_tc_params.py`, commit 51b6543; `~/.claude/projects/-mnt-share-homes-bcreiner-repos-idd-climate-models/corrections/2026-09-23.md`
