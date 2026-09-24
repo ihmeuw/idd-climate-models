@@ -38,6 +38,7 @@ dependencies = [
     "tqdm>=4.67",
     # Cluster-only leaf pipeline: jobmon is a core dep (fleet pin).
     "jobmon_installer_ihme==10.12.2",
+    "pyarrow>=25.0.1",
 ]
 
 [project.optional-dependencies]
@@ -69,7 +70,7 @@ url = "https://artifactory.ihme.washington.edu/artifactory/api/pypi/pypi-shared/
 
 [tool.uv.sources]
 jobmon_installer_ihme = { index = "ihme" }
-idd-spatial-analysis = { path = "../idd-spatial-analysis", editable = true }
+idd-spatial-analysis = { git = "ssh://git@github.com/ihmeuw/idd-spatial-analysis.git", branch = "main" }
 
 [build-system]
 requires = ["uv_build>=0.11,<0.12"]
