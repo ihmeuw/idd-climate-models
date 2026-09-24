@@ -443,24 +443,24 @@ def plot_tc_track(
         ax.add_feature(cfeature.OCEAN, facecolor='lightblue', alpha=0.3)
         ax.add_feature(cfeature.LAND, facecolor='lightgray', alpha=0.3)
         ax.coastlines(resolution='50m', linewidth=0.8)
+        ax.add_feature(cfeature.BORDERS, linewidth=1.0, edgecolor='darkgreen', alpha=0.8)
+        ax.add_feature(cfeature.LAKES, facecolor='lightblue', alpha=0.3)
+        ax.add_feature(cfeature.RIVERS, edgecolor='lightblue', alpha=0.3)
         
         transform = ccrs.PlateCarree()
     else:
         fig, ax = plt.subplots(figsize=figsize)
+        ax.set_facecolor('lightblue')  # Ocean background
         ax.set_xlim(view_lon_min, view_lon_max)
         ax.set_ylim(view_lat_min, view_lat_max)
         transform = None
-    
-    # Plot admin boundaries if provided
-    if admin_gdf is not None and HAS_GEOPANDAS:
-        bbox = shapely_box(view_lon_min, view_lat_min, view_lon_max, view_lat_max)
-        admin_clipped = admin_gdf.clip(bbox)
         
-        if use_cartopy:
-            admin_clipped.boundary.plot(ax=ax, transform=transform,
-                                        linewidth=1.0, edgecolor='darkgreen', alpha=0.8)
-        else:
-            admin_clipped.boundary.plot(ax=ax, linewidth=1.0, edgecolor='darkgreen', alpha=0.8)
+        # Plot admin boundaries from shapefile (no cartopy available)
+        if admin_gdf is not None and HAS_GEOPANDAS:
+            bbox = shapely_box(view_lon_min, view_lat_min, view_lon_max, view_lat_max)
+            admin_clipped = admin_gdf.clip(bbox)
+            admin_clipped.plot(ax=ax, facecolor='lightgray', edgecolor='darkgreen',
+                              linewidth=1.0, alpha=0.8)
     
     # Plot bounding boxes
     if show_bboxes and HAS_GEOPANDAS:
@@ -565,13 +565,9 @@ def plot_tc_track_dual_panel(
     ax1.add_feature(cfeature.OCEAN, facecolor='lightblue', alpha=0.3)
     ax1.add_feature(cfeature.LAND, facecolor='lightgray', alpha=0.3)
     ax1.coastlines(resolution='50m', linewidth=0.8)
-    
-    # Plot admin if provided
-    if admin_gdf is not None and HAS_GEOPANDAS:
-        bbox = shapely_box(west, south, east, north)
-        admin_clipped = admin_gdf.clip(bbox)
-        admin_clipped.boundary.plot(ax=ax1, transform=ccrs.PlateCarree(),
-                                    linewidth=0.8, edgecolor='darkgreen', alpha=0.6)
+    ax1.add_feature(cfeature.BORDERS, linewidth=0.8, edgecolor='darkgreen', alpha=0.6)
+    ax1.add_feature(cfeature.LAKES, facecolor='lightblue', alpha=0.3)
+    ax1.add_feature(cfeature.RIVERS, edgecolor='lightblue', alpha=0.3)
     
     # Plot track colored by wind speed
     # (lon, lat, wind already extracted above)
@@ -591,9 +587,9 @@ def plot_tc_track_dual_panel(
     ax1.plot(lon[0], lat[0], 'g*', markersize=15, transform=ccrs.PlateCarree(), zorder=12)
     ax1.plot(lon[-1], lat[-1], 'r^', markersize=12, transform=ccrs.PlateCarree(), zorder=12)
     
-    gl = ax1.gridlines(draw_labels=True, linewidth=0.3, alpha=0.5)
-    gl.top_labels = False
-    gl.right_labels = False
+    # gl = ax1.gridlines(draw_labels=True, linewidth=0.3, alpha=0.5)
+    # gl.top_labels = False
+    # gl.right_labels = False
     
     ax1.set_title("Track Map", fontsize=12)
     
@@ -732,6 +728,11 @@ def plot_all_tracks(
     wind_vmax: float = 70,
     track_alpha: float = 0.6,
     point_size: float = 8,
+    style: Optional[Dict[str, Dict[str, Any]]] = None,
+    title: Optional[str] = None,
+    wind_categories: Optional[List[Dict[str, Any]]] = None,
+    lat_bounds: Optional[Tuple[float, float]] = None,
+    trim: Optional[str] = None,
 ) -> Tuple[plt.Figure, plt.Axes, "pd.DataFrame"]:
     """
     Plot all storm tracks from a draw on a single map with flexible filtering.
@@ -892,12 +893,48 @@ def plot_all_tracks(
 
     buffer = 5.0
     if effective_basin == "GL":
-        west, east, south, north = -180.0, 180.0, -90.0, 90.0
+        west, east = -180.0, 180.0
+        south = max(float(all_lat.min() - buffer), -90.0)
+        north = min(float(all_lat.max() + buffer), 90.0)
     else:
         west = float(all_lon.min() - buffer)
         east = float(all_lon.max() + buffer)
         south = max(float(all_lat.min() - buffer), -90.0)
         north = min(float(all_lat.max() + buffer), 90.0)
+
+    # Override latitude bounds if explicitly provided
+    if lat_bounds is not None:
+        south, north = lat_bounds[0], lat_bounds[1]
+
+
+    OCEAN_alpha = 0.3
+    LAND_alpha = 0.3
+
+    # ------------------------------------------------------------------
+    # Style defaults for every drawn element
+    # ------------------------------------------------------------------
+    default_style = {
+        "ocean": {"facecolor": "lightblue", "alpha": 0.3},
+        "land": {"facecolor": "lightgray", "alpha": 0.3},
+        "coastlines": {"color": "black", "linewidth": 0.8, "alpha": 1.0},
+        "borders": {"edgecolor": "darkgreen", "linewidth": 0.8, "alpha": 0.6},
+        "lakes": {"facecolor": "lightblue", "alpha": 0.3},
+        "rivers": {"edgecolor": "lightblue", "linewidth": 0.5, "alpha": 0.3},
+        "track_line": {"color": "gray", "linewidth": 0.5, "alpha": track_alpha * 0.5},
+        "track_points": {"point_size": point_size, "edgecolors": "none", "alpha": 1.0,
+                         "linewidths": 0.5, "size_by_wind": False, "size_range": (4, 60)},
+        "genesis_point": {"enabled": False, "size": 40, "color": "black",
+                          "edgecolors": "black", "linewidths": 1.0, "alpha": 1.0,
+                          "marker": "o", "zorder": 7},
+    }
+    # Merge user overrides
+    if style is not None:
+        for key, overrides in style.items():
+            if key in default_style:
+                default_style[key].update(overrides)
+            else:
+                default_style[key] = overrides
+    s = default_style
 
     # ------------------------------------------------------------------
     # Create figure
@@ -909,39 +946,50 @@ def plot_all_tracks(
         data_crs = ccrs.PlateCarree()
         fig, ax = plt.subplots(figsize=figsize, subplot_kw={"projection": proj})
         ax.set_extent([west - central_longitude, east - central_longitude, south, north], crs=proj)
-        ax.add_feature(cfeature.OCEAN, facecolor="lightblue", alpha=0.3)
-        ax.add_feature(cfeature.LAND, facecolor="lightgray", alpha=0.3)
-        ax.coastlines(resolution="50m", linewidth=0.8)
+        ax.add_feature(cfeature.OCEAN, facecolor=s["ocean"]["facecolor"], alpha=s["ocean"]["alpha"])
+        ax.add_feature(cfeature.LAND, facecolor=s["land"]["facecolor"], alpha=s["land"]["alpha"])
+        ax.coastlines(resolution="50m", linewidth=s["coastlines"]["linewidth"],
+                      color=s["coastlines"]["color"])
+        ax.add_feature(cfeature.BORDERS, linewidth=s["borders"]["linewidth"],
+                       edgecolor=s["borders"]["edgecolor"], alpha=s["borders"]["alpha"])
+        ax.add_feature(cfeature.LAKES, facecolor=s["lakes"]["facecolor"], alpha=s["lakes"]["alpha"])
+        ax.add_feature(cfeature.RIVERS, edgecolor=s["rivers"]["edgecolor"],
+                       linewidth=s["rivers"]["linewidth"], alpha=s["rivers"]["alpha"])
         transform = data_crs
     else:
         fig, ax = plt.subplots(figsize=figsize)
+        ax.set_facecolor(s["ocean"]["facecolor"])  # Ocean background
         ax.set_xlim(west, east)
         ax.set_ylim(south, north)
         transform = None
 
+        # Plot admin boundaries from shapefile (no cartopy available)
+        if admin_gdf is not None and HAS_GEOPANDAS:
+            if use_360:
+                from .geo_utils import reproject_gdf_to_360
+                admin_plot = reproject_gdf_to_360(admin_gdf)
+            else:
+                admin_plot = admin_gdf
+            bbox = shapely_box(west, south, east, north)
+            admin_clipped = admin_plot.clip(bbox)
+            admin_clipped.plot(
+                ax=ax, facecolor=s["land"]["facecolor"],
+                edgecolor=s["borders"]["edgecolor"],
+                linewidth=s["borders"]["linewidth"],
+                alpha=s["borders"]["alpha"],
+            )
+
     plot_kw: Dict[str, Any] = {}
     if transform is not None:
         plot_kw["transform"] = transform
-
-    # Admin borders
-    if admin_gdf is not None and HAS_GEOPANDAS:
-        if use_360:
-            from .geo_utils import reproject_gdf_to_360
-            admin_plot = reproject_gdf_to_360(admin_gdf)
-        else:
-            admin_plot = admin_gdf
-        bbox = shapely_box(west, south, east, north)
-        admin_clipped = admin_plot.clip(bbox)
-        admin_clipped.boundary.plot(
-            ax=ax, linewidth=0.8, edgecolor="darkgreen", alpha=0.6,
-            **({"transform": transform} if transform else {}),
-        )
 
     # ------------------------------------------------------------------
     # Plot tracks
     # ------------------------------------------------------------------
     cmap = plt.get_cmap(wind_cmap)
     norm = plt.Normalize(vmin=wind_vmin, vmax=wind_vmax)
+
+    plotted_info: Dict[int, Dict[str, Any]] = {}  # idx -> trimmed stats
 
     for idx in candidate_indices:
         lon = lon_all[idx]
@@ -953,59 +1001,201 @@ def plot_all_tracks(
 
         lon_v, lat_v, wind_v = lon[valid], lat[valid], wind[valid]
 
-        ax.plot(lon_v, lat_v, "-", color="gray", linewidth=0.5,
-                alpha=track_alpha * 0.5, zorder=5, **plot_kw)
-        ax.scatter(lon_v, lat_v, c=wind_v, cmap=cmap, norm=norm,
-                   s=point_size, edgecolors="none", zorder=6, **plot_kw)
+        # Trim modes:
+        #   None  - plot full track
+        #   'decay' - drop trailing points after last wind > 17 m/s
+        #   'all'   - skip storms that never exceed 17 m/s entirely,
+        #             and trim decay tail on those that do
+        if trim is not None:
+            above = np.where(wind_v > 17)[0]
+            if len(above) == 0:
+                if trim == "all":
+                    continue
+                # trim == "decay": storm never exceeded 17, plot full track
+            else:
+                last_above = above[-1]
+                lon_v = lon_v[:last_above + 1]
+                lat_v = lat_v[:last_above + 1]
+                wind_v = wind_v[:last_above + 1]
 
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])
-    plt.colorbar(sm, ax=ax, shrink=0.8, label="Max Wind Speed (m/s)")
+        plotted_info[idx] = {
+            "n_points": len(wind_v),
+            "max_wind": float(wind_v.max()) if len(wind_v) > 0 else np.nan,
+        }
 
-    if use_cartopy:
-        gl = ax.gridlines(draw_labels=True, linewidth=0.3, alpha=0.5)
-        gl.top_labels = False
-        gl.right_labels = False
+        # Break track at antimeridian crossings to avoid horizontal lines
+        # A jump > 180° in consecutive longitudes indicates a wrap
+        lon_diff = np.abs(np.diff(lon_v))
+        break_indices = np.where(lon_diff > 180)[0] + 1
+        segments = np.split(np.arange(len(lon_v)), break_indices)
+
+        for seg in segments:
+            if len(seg) < 2:
+                continue
+            ax.plot(lon_v[seg], lat_v[seg], "-", color=s["track_line"]["color"],
+                    linewidth=s["track_line"]["linewidth"],
+                    alpha=s["track_line"]["alpha"], zorder=5, **plot_kw)
+
+        # Compute point sizes: fixed or scaled by wind speed
+        tp = s["track_points"]
+        if tp["size_by_wind"]:
+            sz_min, sz_max = tp["size_range"]
+            # Linear scale between wind_vmin..wind_vmax -> sz_min..sz_max
+            wind_frac = np.clip((wind_v - wind_vmin) / max(wind_vmax - wind_vmin, 1e-6), 0, 1)
+            pt_sizes = sz_min + wind_frac * (sz_max - sz_min)
+        else:
+            pt_sizes = tp["point_size"]
+
+        if wind_categories is not None:
+            # Assign discrete colors based on category bins
+            point_colors = np.array(["gray"] * len(wind_v), dtype=object)
+            for cat in wind_categories:
+                mask = (wind_v >= cat["min"]) & (wind_v < cat["max"])
+                point_colors[mask] = cat["color"]
+            ax.scatter(lon_v, lat_v, c=point_colors,
+                       s=pt_sizes,
+                       edgecolors=tp["edgecolors"],
+                       linewidths=tp["linewidths"],
+                       alpha=tp["alpha"],
+                       zorder=6, **plot_kw)
+        else:
+            ax.scatter(lon_v, lat_v, c=wind_v, cmap=cmap, norm=norm,
+                       s=pt_sizes,
+                       edgecolors=tp["edgecolors"],
+                       linewidths=tp["linewidths"],
+                       alpha=tp["alpha"],
+                       zorder=6, **plot_kw)
+
+        # Genesis point: highlight the first point of each track
+        gp = s["genesis_point"]
+        if gp["enabled"]:
+            ax.scatter(lon_v[0], lat_v[0],
+                       s=gp["size"], c=gp["color"],
+                       marker=gp["marker"],
+                       edgecolors=gp["edgecolors"],
+                       linewidths=gp["linewidths"],
+                       alpha=gp["alpha"],
+                       zorder=gp["zorder"], **plot_kw)
+
+    # ------------------------------------------------------------------
+    # Colorbar or discrete legend
+    # ------------------------------------------------------------------
+    if wind_categories is not None:
+        # Discrete legend: each entry is {"min": float, "max": float, "color": str, "label": str}
+        from matplotlib.lines import Line2D
+        tp = s["track_points"]
+        cbar_style = s.get("colorbar", {})
+        legend_elements = []
+        legend_scale = cbar_style.get("legend_marker_scale", 1.0)
+        # Legend size range: (min_diameter, max_diameter) in points
+        # Defaults to sqrt of track_points size_range so legend tracks the plot
+        if "legend_size_range" in cbar_style:
+            legend_sz = cbar_style["legend_size_range"]
+        elif tp["size_by_wind"]:
+            legend_sz = (np.sqrt(tp["size_range"][0]), np.sqrt(tp["size_range"][1]))
+        else:
+            legend_sz = (10, 10)
+        for cat in wind_categories:
+            if tp["size_by_wind"]:
+                cat_mid = (cat["min"] + min(cat["max"], wind_vmax)) / 2.0
+                wind_frac = np.clip((cat_mid - wind_vmin) / max(wind_vmax - wind_vmin, 1e-6), 0, 1)
+                # Map linearly in diameter space for clear visual distinction
+                marker_sz = (legend_sz[0] + wind_frac * (legend_sz[1] - legend_sz[0])) * legend_scale
+            else:
+                marker_sz = 10 * legend_scale
+            # Legend marker styling: defaults to plot values, overridable via colorbar style
+            leg_edgecolor = cbar_style.get("legend_edgecolor", tp.get("edgecolors", "none"))
+            leg_edgewidth = cbar_style.get("legend_edgewidth", tp.get("linewidths", 0.5))
+            leg_alpha = cbar_style.get("legend_alpha", 1.0)
+            legend_elements.append(
+                Line2D([0], [0], marker='o', color='w',
+                       markerfacecolor=cat["color"], markersize=marker_sz,
+                       markeredgecolor=leg_edgecolor,
+                       markeredgewidth=leg_edgewidth,
+                       alpha=leg_alpha,
+                       label=cat["label"])
+            )
+        # Add genesis point to legend if enabled and show_in_legend is True
+        gp = s["genesis_point"]
+        if gp.get("enabled") and gp.get("show_in_legend", False):
+            gp_sz = np.sqrt(gp.get("size", 40)) * legend_scale
+            legend_elements.append(
+                Line2D([0], [0], marker=gp.get("marker", "o"), color='w',
+                       markerfacecolor=gp.get("color", "black"),
+                       markersize=gp_sz,
+                       markeredgecolor=gp.get("edgecolors", "black"),
+                       markeredgewidth=gp.get("linewidths", 1.0),
+                       alpha=gp.get("alpha", 1.0),
+                       label=gp.get("label", "Genesis"))
+            )
+        ncol = cbar_style.get("legend_ncol", len(wind_categories))
+        legend_y = cbar_style.get("legend_y_anchor", -0.05)
+        ax.legend(
+            handles=legend_elements,
+            loc="upper center",
+            bbox_to_anchor=(0.5, legend_y),
+            ncol=ncol,
+            fontsize=cbar_style.get("fontsize", 10),
+            framealpha=cbar_style.get("framealpha", 0.9),
+            title=cbar_style.get("label", None),
+            title_fontsize=cbar_style.get("title_fontsize", 11),
+        )
+        plt.subplots_adjust(bottom=cbar_style.get("bottom_pad", 0.12))
+    else:
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        cbar_style = s.get("colorbar", {})
+        cbar = plt.colorbar(sm, ax=ax, shrink=cbar_style.get("shrink", 0.8))
+        cbar.set_label(
+            cbar_style.get("label", "Max Wind Speed (m/s)"),
+            fontsize=cbar_style.get("label_fontsize", 12),
+        )
+        cbar.ax.tick_params(labelsize=cbar_style.get("tick_fontsize", 10))
 
     # ------------------------------------------------------------------
     # Title
     # ------------------------------------------------------------------
-    n_plotted = len(candidate_indices)
-    date_str = ""
-    if start_date:
-        date_str += f" from {start_date[0]}-{start_date[1]:02d}"
-    if end_date:
-        date_str += f" to {end_date[0]}-{end_date[1]:02d}"
+    n_plotted = len(plotted_info)
+    title_style = s.get("title", {})
+    if title is not None:
+        ax.set_title(title,
+                     fontsize=title_style.get("fontsize", 13),
+                     fontweight=title_style.get("fontweight", "bold"))
+    else:
+        date_str = ""
+        if start_date:
+            date_str += f" from {start_date[0]}-{start_date[1]:02d}"
+        if end_date:
+            date_str += f" to {end_date[0]}-{end_date[1]:02d}"
 
-    country_str = ""
-    if country_filter == "any":
-        country_str = ", hitting any country"
-    elif isinstance(country_filter, list):
-        country_str = f", hitting {country_filter}"
+        country_str = ""
+        if country_filter == "any":
+            country_str = ", hitting any country"
+        elif isinstance(country_filter, list):
+            country_str = f", hitting {country_filter}"
 
-    basin_str = basin_filter if (basin_filter and basin_filter != "GL") else "all basins"
-    ax.set_title(
-        f"{basin_data.model}/{basin_data.variant} - {basin_data.scenario} - "
-        f"{basin_data.time_period} - Draw {draw}\n"
-        f"{n_plotted} tracks in {basin_str}{date_str}{country_str}",
-        fontsize=13, fontweight="bold",
-    )
+        basin_str = basin_filter if (basin_filter and basin_filter != "GL") else "all basins"
+        ax.set_title(
+            f"{basin_data.model}/{basin_data.variant} - {basin_data.scenario} - "
+            f"{basin_data.time_period} - Draw {draw}\n"
+            f"{n_plotted} tracks in {basin_str}{date_str}{country_str}",
+            fontsize=13, fontweight="bold",
+        )
     plt.tight_layout()
 
     # ------------------------------------------------------------------
     # Build summary DataFrame
     # ------------------------------------------------------------------
     rows = []
-    for idx in candidate_indices:
-        wind = wind_all[idx]
-        valid_wind = wind[~np.isnan(wind)]
+    for idx in plotted_info:
+        pi = plotted_info[idx]
         row = {
             "track_index": int(idx),
             "year": int(years[idx]),
             "month": int(months[idx]),
             "basin": basins[idx].strip() if isinstance(basins[idx], str) else basins[idx],
-            "max_wind": float(valid_wind.max()) if len(valid_wind) > 0 else np.nan,
-            "n_points": int((~np.isnan(lon_all[idx])).sum()),
+            "max_wind": pi["max_wind"],
+            "n_points": pi["n_points"],
         }
         if idx in track_countries:
             row["countries_hit"] = track_countries[idx]
