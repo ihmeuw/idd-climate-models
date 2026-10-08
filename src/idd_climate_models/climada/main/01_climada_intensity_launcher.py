@@ -1,9 +1,34 @@
+import argparse
+import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 import pandas as pd  # type: ignore
 from jobmon.client.tool import Tool  # type: ignore
 from pathlib import Path
 import xarray as xr  # type: ignore
 from rra_tools.parallel import run_parallel  # type: ignore
+
+from stage1_run_config import (
+    LEGACY_RUN_CONFIG,
+    add_run_option_args,
+    build_run_config,
+    log_dir_for,
+)
+
+# Run options are passed verbatim to every task (see stage1_run_config.py).
+parser = argparse.ArgumentParser(description="Launch CLIMADA stage 1 (intensity) tasks")
+add_run_option_args(parser)
+args = parser.parse_args()
+
+RUN_CONFIG = build_run_config(args.reestimate_central_pressure, args.convert_wind_to_knots)
+RUN_OPTION_FLAGS = " ".join(
+    flag for flag, on in [
+        ("--reestimate_central_pressure", args.reestimate_central_pressure),
+        ("--convert_wind_to_knots", args.convert_wind_to_knots),
+        ("--overwrite_okay", args.overwrite_okay),
+    ] if on
+)
+print(f"Output: {args.output_path} | run config: {RUN_CONFIG}")
 
 DRAWS_TOTAL = 100
 DRAWS_PER_BATCH = 5
@@ -128,22 +153,40 @@ full_tasks_df = (
 # draws marked), the launcher reruns the WHOLE batch. The main script's
 # per-storm resume logic short-circuits the already-done draws inside it,
 # so cost is minimal — we just pay one task slot for the catch-up draws.
+#
+# A marker only counts if it was written with the requested run config
+# (markers without one predate run configs and count as LEGACY_RUN_CONFIG).
+# Draws done under another config are submitted; the main script then
+# refuses them unless --overwrite_okay is passed.
 ######################################################################
-LOG_DIR = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage1_v2_log/")
+LOG_DIR = log_dir_for(args.output_path)
 MARKER_ROOT = LOG_DIR / "draw_completion_markers"
+
+def _completed_draw_key(marker: Path) -> tuple | None:
+    """(source_id, ..., basin, draw) if the marker was written with RUN_CONFIG."""
+    parts = marker.relative_to(MARKER_ROOT).parts
+    # expected: (source_id, variant_label, experiment_id, batch_year, basin, "draw_NNNN.json")
+    if len(parts) != 6:
+        return None
+    try:
+        draw = int(parts[5].removeprefix("draw_").removesuffix(".json"))
+        with open(marker) as f:
+            marker_config = json.load(f).get("run_config", LEGACY_RUN_CONFIG)
+    except (ValueError, OSError):
+        return None
+    if marker_config != RUN_CONFIG:
+        return None
+    return (parts[0], parts[1], parts[2], parts[3], parts[4], draw)
+
 
 completed_draws: set[tuple] = set()
 if MARKER_ROOT.exists():
-    for marker in MARKER_ROOT.rglob("draw_*.json"):
-        parts = marker.relative_to(MARKER_ROOT).parts
-        # expected: (source_id, variant_label, experiment_id, batch_year, basin, "draw_NNNN.json")
-        if len(parts) != 6:
-            continue
-        try:
-            draw = int(parts[5].removeprefix("draw_").removesuffix(".json"))
-        except ValueError:
-            continue
-        completed_draws.add((parts[0], parts[1], parts[2], parts[3], parts[4], draw))
+    # Threaded: reading ~370k small marker files one by one takes ~9 minutes.
+    with ThreadPoolExecutor(max_workers=32) as pool:
+        completed_draws = {
+            key for key in pool.map(_completed_draw_key, MARKER_ROOT.rglob("draw_*.json"), chunksize=256)
+            if key is not None
+        }
 
 
 def _batch_is_complete(row: pd.Series) -> bool:
@@ -249,9 +292,11 @@ for _, config in unique_configs.iterrows():
             "--basin {basin} "
             "--draw_batch {draw_batch} "
             "--num_cores {num_cores} "
+            "--output_path {output_path} "
+            f"{RUN_OPTION_FLAGS}"
         ),
         node_args=["source_id", "variant_label", "experiment_id", "batch_year", "basin", "draw_batch", "num_cores"],
-        task_args=[],
+        task_args=["output_path"],
         op_args=[],
     )
 
@@ -270,6 +315,7 @@ for row in new_meta.itertuples():
         basin=row.basin,
         draw_batch=row.draw_batch,
         num_cores=row.num_cores,
+        output_path=str(args.output_path),
     )
     tasks.append(task)
 

@@ -13,14 +13,14 @@ STORM_DRAW_TABLE_PATH = Path("/mnt/team/rapidresponse/pub/tropical-storms/storm_
 # ── Admin level ───────────────────────────────────────────────────────────────
 # Set to 0 or 1. Controls which metadata parquet, shapefile, and output root
 # are used. All other launcher logic is identical across levels.
-ADMIN_LEVEL = 1
+ADMIN_LEVEL = 0
 
 if ADMIN_LEVEL == 0:
-    SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage3_v2/")
+    SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage3_v3/")
     META_PARQUET = Path(
-        "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin0_count.parquet"
+        "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin0_count_v3.parquet"
     )
-    GENERATE_SCRIPT = Path(__file__).resolve().parent / "generate_storm_draw_admin0_count.py"
+    GENERATE_SCRIPT = Path(__file__).resolve().parent.parent / "prep" / "generate_storm_draw_admin0_count.py"
     METRIC_COLS = [
         "n_storms_in_batch", "estimated_storms_per_year", "year",
         "num_admin0_first_year", "num_years_in_batch", "estimated_admin0_total",
@@ -33,11 +33,11 @@ if ADMIN_LEVEL == 0:
         {"resource_bin": "light", "memory_gb_assigned": 50, "runtime_min_assigned": 35},
     ])
 elif ADMIN_LEVEL == 1:
-    SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage3_v2_admin1/")
+    SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage3_v3_admin1/")
     META_PARQUET = Path(
-        "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin1_count.parquet"
+        "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin1_count_v3.parquet"
     )
-    GENERATE_SCRIPT = Path(__file__).resolve().parent / "generate_storm_draw_admin1_count.py"
+    GENERATE_SCRIPT = Path(__file__).resolve().parent.parent / "prep" / "generate_storm_draw_admin1_count.py"
     METRIC_COLS = [
         "n_storms_in_batch", "estimated_storms_per_year", "year",
         "num_admin1_first_year", "num_years_in_batch", "estimated_admin1_total",
@@ -96,8 +96,9 @@ def _stage3_paf_path(
 
 def task_is_complete(row) -> bool:
     """A stage-3 task is complete iff every year in its batch_year has a
-    paf parquet on disk that's at least 1 KB. Mirrors the existence + size
-    check in `check_if_year_complete`; skips the parquet header validity
+    paf parquet on disk that's at least 1 KB, or a .no_intersection marker.
+    Mirrors the existence + size check in `check_if_year_complete`; skips
+    the parquet header validity
     test (the main script's resume logic will catch and rebuild invalid
     files at runtime)."""
     start_year, end_year = map(int, row["batch_year"].split("-"))
@@ -113,6 +114,8 @@ def task_is_complete(row) -> bool:
             sample_name=row["sample_name"],
             year=year,
         )
+        if path.with_suffix(".no_intersection").exists():
+            continue  # no admin intersects this year (see the main script)
         if not path.exists() or path.stat().st_size < 1024:
             return False
     return True

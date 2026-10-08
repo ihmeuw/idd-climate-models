@@ -1,5 +1,5 @@
 """
-Generate storm_draw_admin0_count_v2.parquet
+Generate storm_draw_admin0_count_v3.parquet
 
 For each (storm_draw, source_id, variant_label, experiment_id, batch_year, basin) task:
   - n_storms_in_batch: count of storm_XXXX dirs in the base stage1 zarr
@@ -7,7 +7,7 @@ For each (storm_draw, source_id, variant_label, experiment_id, batch_year, basin
   - num_admin0_first_year: unique admin0 regions in the first-year PAF raster
   - num_years_in_batch / estimated_admin0_total: derived
 
-Output: /mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin0_count_v2.parquet
+Output: /mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin0_count_v3.parquet
 """
 
 from pathlib import Path
@@ -40,14 +40,18 @@ STORM_DRAW_TABLE_PATH = Path(
 GDF_PATH = Path(
     "/mnt/team/rapidresponse/pub/tropical-storms/data/global_shapefile/global_WGS84_admin0.parquet"
 )
+# NA PAF rasters are -180..180; stage 3 uses this pre-normalized file for NA.
+GDF_PATH_NA = Path(
+    "/mnt/team/rapidresponse/pub/tropical-storms/data/global_shapefile/global_WGS84_admin0_normalized.parquet"
+)
 PAF_ROOT = Path(
-    "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage2_v2/"
+    "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage2_v3/"
 )
 STAGE1_ROOT = Path(
-    "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage1_v2"
+    "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage1_v3"
 )
 OUTPUT_PATH = Path(
-    "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin0_count.parquet"
+    "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin0_count_v3.parquet"
 )
 
 NUM_CORES = 64
@@ -217,6 +221,7 @@ def build_full_tasks_df() -> pd.DataFrame:
 # ── Per-row processor ─────────────────────────────────────────────────────────
 
 shapefile: gpd.GeoDataFrame = gpd.read_parquet(GDF_PATH)
+shapefile_na: gpd.GeoDataFrame = gpd.read_parquet(GDF_PATH_NA)
 
 
 def process_row(row: pd.Series) -> list[dict[str, Any]]:
@@ -238,7 +243,8 @@ def process_row(row: pd.Series) -> list[dict[str, Any]]:
     )
     raw_paf_raster = clean_paf_raster(raw_paf_raster)
 
-    intersected = intersect_shapefile_with_raster(shapefile, raw_paf_raster)
+    basin_shapes = shapefile_na if params["basin"] == "NA" else shapefile
+    intersected = intersect_shapefile_with_raster(basin_shapes, raw_paf_raster)
     num_admin0_first_year = intersected["ADM0_CODE"].nunique()
 
     del raw_paf_raster, intersected

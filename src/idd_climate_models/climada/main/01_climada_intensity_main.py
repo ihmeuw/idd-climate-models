@@ -6,6 +6,7 @@ from pathlib import Path
 import xarray as xr  # type: ignore
 import numpy as np  # type: ignore
 from climada.hazard import TCTracks, TropCyclone, Centroids
+from climada.hazard.tc_tracks import _estimate_pressure
 import gc
 import re
 import json
@@ -23,36 +24,23 @@ from shapely.geometry import box  # type: ignore
 from affine import Affine  # type: ignore
 from rasterio.errors import WindowError
 
+from stage1_run_config import (
+    DEFAULT_SAVE_ROOT,
+    LEGACY_RUN_CONFIG,
+    MS_TO_KN,
+    add_run_option_args,
+    build_run_config,
+    log_dir_for,
+)
+
 import logging
 
 logging.getLogger("climada").setLevel(logging.WARNING)
 
 
-parser = argparse.ArgumentParser(description="Run CLIMADA code")
-
-# Define arguments
-parser.add_argument("--source_id", type=str, required=True, help="Source Id")
-parser.add_argument("--variant_label", type=str, required=True, help="Variant Label")
-parser.add_argument("--experiment_id", type=str, required=True, help="Experiment Id")
-parser.add_argument("--batch_year", type=str, required=True, help="Batch Year")
-parser.add_argument("--basin", type=str, required=True, help="Basin")
-parser.add_argument("--draw_batch", type=str, required=True, help="Draw batch (e.g., '0-9')")
-parser.add_argument("--num_cores", type=int, default=1, help="Number of cores to use for parallel processing")
-
-# Parse arguments
-args = parser.parse_args()
-source_id = args.source_id
-variant_label = args.variant_label
-experiment_id = args.experiment_id
-batch_year = args.batch_year
-basin = args.basin
-draw_batch = args.draw_batch
-num_cores = args.num_cores
-
 # Constants
 ROOT_PATH = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/input/cmip6/")
-SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage1_v2/")
-LOG_DIR = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage1_v2_log/")
+SAVE_ROOT = DEFAULT_SAVE_ROOT
 RESOLUTION = 0.1  # degrees
 GDF_PATH = Path("/mnt/team/rapidresponse/pub/tropical-storms/data/global_shapefile/global_WGS84.parquet")
 SHP_ROOT_NORMALIZED = Path('/snfs1/WORK/11_geospatial/admin_shapefiles/2024_07_29')
@@ -120,12 +108,29 @@ def read_single_storm_from_dataset(ds_all, storm_index: int) -> xr.Dataset:
     return ds_track.isel(time=slice(t0, t1)).load()
 
 
+def estimate_central_pressure_with_climada(ds: xr.Dataset) -> xr.Dataset:
+    """
+    Replace `central_pressure` with CLIMADA's statistical fit, i.e. the
+    non-ensemble estimate. `environmental_pressure` is left as read.
+
+    The input files hold TC-risk's vmax_trks in m/s (labelled "kn"), so wind
+    is converted to knots for the fit. Longitude is put back in 0..360, as
+    TC-risk outputs it and as add_tc_params fit it, so the result equals the
+    pipeline's use_ensemble=False estimate (the input files store -180..180).
+    """
+    lon = ds["lon"].values % 360
+    vmax_kn = ds["max_sustained_wind"].values * MS_TO_KN
+    cp = _estimate_pressure(np.full(vmax_kn.shape, np.nan), ds["lat"].values, lon, vmax_kn)
+    return ds.assign(central_pressure=(ds["central_pressure"].dims, cp))
 
 
-def normalize_nc_storm_for_climada(ds_track: xr.Dataset) -> xr.Dataset:
+def normalize_nc_storm_for_climada(
+    ds_track: xr.Dataset,
+    convert_wind_to_knots: bool = False,
+) -> xr.Dataset:
     """
     Convert a single-track NC slice into the exact CLIMADA-compatible structure.
-    
+
     Keeps arrays square (padded time steps included), but computes
     start_date and end_date using only valid (non-NaN) core variable time steps.
     """
@@ -155,6 +160,9 @@ def normalize_nc_storm_for_climada(ds_track: xr.Dataset) -> xr.Dataset:
     lon = ds_track["lon"].values
     lat = ds_track["lat"].values
     vmax = ds_track["max_sustained_wind"].values
+    if convert_wind_to_knots:
+        # Input files hold m/s under a "kn" label; convert so the label is true.
+        vmax = vmax * MS_TO_KN
     cp = ds_track["central_pressure"].values
     env = ds_track["environmental_pressure"].values
 
@@ -204,8 +212,8 @@ def normalize_nc_storm_for_climada(ds_track: xr.Dataset) -> xr.Dataset:
     return ds
 
 
-def prepare_track_for_climada(ds_track: xr.Dataset):
-    tc_track = normalize_nc_storm_for_climada(ds_track)
+def prepare_track_for_climada(ds_track: xr.Dataset, convert_wind_to_knots: bool = False):
+    tc_track = normalize_nc_storm_for_climada(ds_track, convert_wind_to_knots)
     return TCTracks(data=[tc_track])
 
 
@@ -234,6 +242,22 @@ def ensure_min_grid(da: xr.DataArray, buffer_deg: float = 0.1) -> xr.DataArray:
         da = da.reindex(lon=[c-buffer_deg, c, c+buffer_deg], fill_value=np.nan)
 
     return da
+
+
+def crop_to_footprint(da: xr.DataArray) -> xr.DataArray:
+    """
+    Crop to the bounding box of finite values. Interior all-NaN rows/cols
+    (gaps between disjoint footprint pieces) are kept so the lat/lon grid
+    stays uniformly spaced; `dropna(how="all")` would remove them and
+    `to_raster` would then infer a stretched resolution.
+    """
+    valid = da.notnull()
+    rows = np.flatnonzero(valid.any(dim=[d for d in da.dims if d != "lat"]).values)
+    cols = np.flatnonzero(valid.any(dim=[d for d in da.dims if d != "lon"]).values)
+    return da.isel(
+        lat=slice(rows[0], rows[-1] + 1),
+        lon=slice(cols[0], cols[-1] + 1),
+    )
 
 
 def normalize_lon_to_180(da: xr.DataArray) -> xr.DataArray:
@@ -500,8 +524,7 @@ def compute_yearly_exposure_per_storm(
     # ---- For valid storms ----
     # Remove empty space (zeros) outside storm footprint
     yearly_exposure = yearly_exposure.where(yearly_exposure > 0)
-    yearly_exposure = yearly_exposure.dropna(dim="lat", how="all")
-    yearly_exposure = yearly_exposure.dropna(dim="lon", how="all")
+    yearly_exposure = crop_to_footprint(yearly_exposure)
 
 
     # --------------------------------------------------
@@ -599,8 +622,7 @@ def generate_intensity_per_storm(
 
     # ---- Crop to storm footprint in 0–360 ----
     da = da.where(da > 0)
-    da = da.dropna(dim="lat", how="all")
-    da = da.dropna(dim="lon", how="all")
+    da = crop_to_footprint(da)
 
     # --------------------------------------------------
     # Expand single-pixel footprint by creating new grid
@@ -805,6 +827,18 @@ def to_raster(
 
     dlat = (lat[1:] - lat[:-1]).mean()
     dlon = (lon[1:] - lon[:-1]).mean()
+
+    # The affine transform assumes a regular grid; a gap in the coords would
+    # otherwise be silently averaged into a stretched resolution.
+    if not (
+        np.allclose(np.diff(lat), dlat, atol=1e-6)
+        and np.allclose(np.diff(lon), dlon, atol=1e-6)
+    ):
+        raise ValueError(
+            f"to_raster requires uniformly spaced coords; got lat steps "
+            f"{np.unique(np.round(np.diff(lat), 6))}, lon steps "
+            f"{np.unique(np.round(np.diff(lon), 6))}"
+        )
 
     # 🔑 detect latitude direction
     lat_increasing = lat[1] > lat[0]
@@ -1214,6 +1248,37 @@ def check_existing_storm_in_zarr(
     return True
 
 
+def _draw_log_path(
+    log_root: Path,
+    kind: str,
+    source_id,
+    variant_label,
+    experiment_id,
+    batch_year,
+    basin,
+    draw,
+) -> Path:
+    """Per-draw JSON under <log_root>/<kind>/ (completion markers, run configs)."""
+    return (
+        log_root
+        / kind
+        / source_id
+        / variant_label
+        / experiment_id
+        / batch_year
+        / basin
+        / f"draw_{draw:04d}.json"
+    )
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    with open(tmp_path, "w") as f:
+        json.dump(payload, f, indent=2)
+    tmp_path.replace(path)
+
+
 def write_draw_completion_marker(
     log_root: Path,
     source_id,
@@ -1222,19 +1287,12 @@ def write_draw_completion_marker(
     batch_year,
     basin,
     draw,
+    run_config: dict,
 ):
-    log_root = log_root / "draw_completion_markers"
-    marker_dir = (
-        log_root
-        / source_id
-        / variant_label
-        / experiment_id
-        / batch_year
-        / basin
+    marker_path = _draw_log_path(
+        log_root, "draw_completion_markers",
+        source_id, variant_label, experiment_id, batch_year, basin, draw,
     )
-    marker_dir.mkdir(parents=True, exist_ok=True)
-
-    marker_path = marker_dir / f"draw_{draw:04d}.json"
 
     payload = {
         "source_id": source_id,
@@ -1244,12 +1302,9 @@ def write_draw_completion_marker(
         "basin": basin,
         "draw": draw,
         "completed_utc": datetime.now(timezone.utc).isoformat(),
+        "run_config": run_config,
     }
-
-    tmp_path = marker_path.with_suffix(".tmp")
-    with open(tmp_path, "w") as f:
-        json.dump(payload, f, indent=2)
-    tmp_path.replace(marker_path)
+    _write_json_atomic(marker_path, payload)
 
 def is_draw_completed(
     log_root: Path,
@@ -1260,18 +1315,154 @@ def is_draw_completed(
     basin,
     draw,
 ):
-    log_root = log_root / "draw_completion_markers"
+    return _draw_log_path(
+        log_root, "draw_completion_markers",
+        source_id, variant_label, experiment_id, batch_year, basin, draw,
+    ).exists()
 
-    marker_path = (
-        log_root
-        / source_id
-        / variant_label
-        / experiment_id
-        / batch_year
-        / basin
-        / f"draw_{draw:04d}.json"
+
+#################################
+#     Run Config Per Draw       #
+#################################
+# Each draw records the run config its results were written with (see
+# stage1_run_config.py). Resuming a draw is only allowed under the same
+# config; anything else needs --overwrite_okay, which removes the draw's
+# results first so a partial rerun never leaves old-config storms behind.
+
+def _draw_result_paths(
+    save_root: Path,
+    log_root: Path,
+    source_id,
+    variant_label,
+    experiment_id,
+    batch_year,
+    basin,
+    draw,
+) -> list[Path]:
+    """Everything stage 1 writes for one draw."""
+    draw_text = "" if draw == 0 else f"_e{draw - 1}"
+    start_year, end_year = batch_year.split("-")
+    basin_dir = save_root / source_id / variant_label / experiment_id / batch_year / basin
+    stores = [
+        basin_dir / metric
+        / f"{metric}_{basin}_{source_id}_{experiment_id}_{variant_label}_{start_year}01_{end_year}12{draw_text}.zarr"
+        for metric in ("intensity", "exposure_hours")
+    ]
+    landfall_dir = _landfall_parquet_path(
+        source_id, variant_label, experiment_id, batch_year, basin, draw, 0, save_root,
+    ).parent
+    ids = (source_id, variant_label, experiment_id, batch_year, basin, draw)
+    return stores + [
+        landfall_dir,
+        _draw_log_path(log_root, "draw_completion_markers", *ids),
+        _draw_log_path(log_root, "draw_run_configs", *ids),
+    ]
+
+
+def recorded_draw_run_config(
+    save_root: Path,
+    log_root: Path,
+    source_id,
+    variant_label,
+    experiment_id,
+    batch_year,
+    basin,
+    draw,
+) -> dict | None:
+    """
+    Run config the draw's existing results were written with, or None if the
+    draw has no results. Results from before run configs were recorded count
+    as LEGACY_RUN_CONFIG.
+    """
+    ids = (source_id, variant_label, experiment_id, batch_year, basin, draw)
+    config_path = _draw_log_path(log_root, "draw_run_configs", *ids)
+    if config_path.exists():
+        with open(config_path) as f:
+            return json.load(f)
+    if any(p.exists() for p in _draw_result_paths(save_root, log_root, *ids)):
+        return LEGACY_RUN_CONFIG
+    return None
+
+
+def write_draw_run_config(
+    log_root: Path,
+    source_id,
+    variant_label,
+    experiment_id,
+    batch_year,
+    basin,
+    draw,
+    run_config: dict,
+) -> None:
+    _write_json_atomic(
+        _draw_log_path(
+            log_root, "draw_run_configs",
+            source_id, variant_label, experiment_id, batch_year, basin, draw,
+        ),
+        run_config,
     )
-    return marker_path.exists()
+
+
+def remove_draw_results(
+    save_root: Path,
+    log_root: Path,
+    source_id,
+    variant_label,
+    experiment_id,
+    batch_year,
+    basin,
+    draw,
+) -> None:
+    for path in _draw_result_paths(
+        save_root, log_root,
+        source_id, variant_label, experiment_id, batch_year, basin, draw,
+    ):
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.exists():
+            path.unlink()
+
+
+def check_existing_results(
+    draws: list[int],
+    save_root: Path,
+    log_root: Path,
+    run_config: dict,
+    overwrite_okay: bool,
+    source_id,
+    variant_label,
+    experiment_id,
+    batch_year,
+    basin,
+) -> None:
+    """
+    Exit non-zero, before anything is written, if any draw already has results
+    from a different run config and --overwrite_okay was not passed. Results
+    from the same config are resumed as usual (Jobmon retries rely on this).
+    """
+    conflicts = {}
+    for draw in draws:
+        recorded = recorded_draw_run_config(
+            save_root, log_root,
+            source_id, variant_label, experiment_id, batch_year, basin, draw,
+        )
+        if recorded is not None and recorded != run_config:
+            conflicts[draw] = recorded
+
+    if not conflicts:
+        return
+
+    if not overwrite_okay:
+        print(
+            f"❌ {len(conflicts)} draw(s) {sorted(conflicts)} already have results under "
+            f"{save_root} written with a different run config.\n"
+            f"   existing:  {next(iter(conflicts.values()))}\n"
+            f"   requested: {run_config}\n"
+            f"   Pass --overwrite_okay to replace them, or choose another --output_path."
+        )
+        raise SystemExit(1)
+
+    print(f"⚠️ --overwrite_okay: replacing results for draw(s) {sorted(conflicts)}.")
 
 ############################################
 #              Main                        #
@@ -1281,11 +1472,15 @@ def process_single_storm(
     storm_index, ds_all, save_root,
     source_id, variant_label, experiment_id, batch_year, basin, draw,
     centroids, global_land_gdf,
+    run_config: dict = LEGACY_RUN_CONFIG,
+    convert_wind_to_knots: bool = False,
 ) -> None:
     """
     Process a single storm: validate existing zarr, compute intensity + exposure,
     clip to land, and persist both metrics. Errors propagate to the caller, which
     catches and continues to the next storm.
+
+    `run_config` is stored as attrs on both metrics' zarr groups.
     """
 
     # Check if storm has already been processed (by checking all three stores)
@@ -1304,7 +1499,7 @@ def process_single_storm(
     
     # --- Load storm directly from open dataset ---
     ds_track = read_single_storm_from_dataset(ds_all, storm_index)
-    tc_tracks = prepare_track_for_climada(ds_track)
+    tc_tracks = prepare_track_for_climada(ds_track, convert_wind_to_knots)
     # start_date is fixed once tc_tracks is built and survives even if
     # downstream CLIMADA processing raises.
     start_date = tc_tracks.data[0].attrs.get("start_date")
@@ -1358,6 +1553,7 @@ def process_single_storm(
         return
 
     storm_intensity = clip_raster_to_land(storm_intensity, land_geom)
+    storm_intensity.attrs.update(run_config)
 
     save_single_storm_metric(
         storm_intensity,
@@ -1372,21 +1568,11 @@ def process_single_storm(
         save_root=save_root,
     )
 
-    # Per-location landfall records (uses the same land-clipped intensity)
+    # Per-location landfall records (uses the same land-clipped intensity).
+    # Saved only after the exposure zarr below, so the parquet sentinel is
+    # never on disk for a storm whose exposure write didn't happen.
     landfall_records = compute_storm_landfall_locations(
         storm_intensity, land_gdf, wind_threshold=17.0,
-    )
-    save_storm_landfall_locations(
-        landfall_records,
-        source_id=source_id,
-        variant_label=variant_label,
-        experiment_id=experiment_id,
-        batch_year=batch_year,
-        basin=basin,
-        draw=draw,
-        storm_index=storm_index,
-        start_date=start_date,
-        save_root=save_root,
     )
 
     del storm_intensity
@@ -1401,6 +1587,7 @@ def process_single_storm(
         storm_exposure = normalize_lon_to_180(storm_exposure)
 
     storm_exposure = clip_raster_to_land(storm_exposure, land_geom)
+    storm_exposure.attrs.update(run_config)
 
     save_single_storm_metric(
         storm_exposure,
@@ -1416,12 +1603,31 @@ def process_single_storm(
     )
     del storm_exposure
 
+    # Completion sentinel — written last (see check_existing_storm_in_zarr).
+    save_storm_landfall_locations(
+        landfall_records,
+        source_id=source_id,
+        variant_label=variant_label,
+        experiment_id=experiment_id,
+        batch_year=batch_year,
+        basin=basin,
+        draw=draw,
+        storm_index=storm_index,
+        start_date=start_date,
+        save_root=save_root,
+    )
 
     del storm_speed
     del tc_tracks, haz
     gc.collect()
 
-def process_single_draw(draw_info):
+def process_single_draw(draw_info) -> list[int]:
+    """
+    Process every storm in one draw. Returns the storm indices that raised;
+    the draw completion marker is only written when that list is empty, so
+    a draw with failed storms is resubmitted (and only the failed storms
+    recompute — completed ones short-circuit on their landfall parquet).
+    """
     (
         source_id,
         variant_label,
@@ -1430,13 +1636,29 @@ def process_single_draw(draw_info):
         basin,
         draw,
         save_root,
+        log_dir,
+        reestimate_central_pressure,
+        convert_wind_to_knots,
+        overwrite_okay,
     ) = draw_info
 
     print(f"▶ Processing draw {draw} | {source_id} {variant_label} {experiment_id} {batch_year} {basin}")
 
+    run_config = build_run_config(reestimate_central_pressure, convert_wind_to_knots)
+    ids = (source_id, variant_label, experiment_id, batch_year, basin, draw)
+
+    # main() has already refused conflicting results unless --overwrite_okay.
+    recorded = recorded_draw_run_config(save_root, log_dir, *ids)
+    if recorded is not None and recorded != run_config:
+        if not overwrite_okay:
+            raise RuntimeError(f"Draw {draw} has results from run config {recorded}")
+        print(f"♻️ Removing draw {draw} results written with run config {recorded}")
+        remove_draw_results(save_root, log_dir, *ids)
+    write_draw_run_config(log_dir, *ids, run_config)
+
     # check if draw is already completed
     if is_draw_completed(
-        log_root=LOG_DIR,
+        log_root=log_dir,
         source_id=source_id,
         variant_label=variant_label,
         experiment_id=experiment_id,
@@ -1445,7 +1667,7 @@ def process_single_draw(draw_info):
         draw=draw,
     ):
         print(f"⚠️ Draw {draw} already marked as completed, skipping.")
-        return
+        return []
 
     # check and cleanup any existing stores with partial files before processing
     check_and_cleanup_zarr_store(
@@ -1476,10 +1698,16 @@ def process_single_draw(draw_info):
     # (or cleans up) already-completed storms.
     with xr.open_dataset(nc_file) as ds_all:
 
+        # Re-estimate before get_storm_indices, which requires finite
+        # central_pressure, so storm selection uses the pressure CLIMADA sees.
+        if reestimate_central_pressure:
+            ds_all = estimate_central_pressure_with_climada(ds_all)
+
         storm_indices = get_storm_indices(ds_all)
 
         centroids = generate_basin_centroids(basin, res=RESOLUTION)
 
+        failed_storms: list[int] = []
         for storm_index in storm_indices:
             try:
                 process_single_storm(
@@ -1494,6 +1722,8 @@ def process_single_draw(draw_info):
                     draw,
                     centroids,
                     global_land_gdf,
+                    run_config=run_config,
+                    convert_wind_to_knots=convert_wind_to_knots,
                 )
             except Exception as e:
                 print(
@@ -1502,6 +1732,7 @@ def process_single_draw(draw_info):
                     f"{type(e).__name__}: {e}"
                 )
                 traceback.print_exc()
+                failed_storms.append(storm_index)
                 gc.collect()
                 continue
 
@@ -1524,18 +1755,27 @@ def process_single_draw(draw_info):
             except Exception as e:
                 print(f"⚠️ Could not set permissions for {zarr_path}: {e}")
 
+    if failed_storms:
+        print(
+            f"❌ Draw {draw} incomplete: {len(failed_storms)} storm(s) failed "
+            f"{failed_storms}; not writing completion marker."
+        )
+        return failed_storms
+
     # log completion of draw as text file
     write_draw_completion_marker(
-        log_root=LOG_DIR,
+        log_root=log_dir,
         source_id=source_id,
         variant_label=variant_label,
         experiment_id=experiment_id,
         batch_year=batch_year,
         basin=basin,
         draw=draw,
+        run_config=run_config,
     )
 
     print(f"✅ Completed draw {draw}")
+    return []
 
 def main(
     source_id: str,
@@ -1546,6 +1786,9 @@ def main(
     draw_batch: str,
     num_cores: int = 4,
     save_root: Path = SAVE_ROOT,
+    reestimate_central_pressure: bool = False,
+    convert_wind_to_knots: bool = False,
+    overwrite_okay: bool = False,
 ):
     """
     Parallelize over draws.
@@ -1553,6 +1796,17 @@ def main(
     """
     start_draw, end_draw = map(int, draw_batch.split("-"))
     draws = list(range(start_draw, end_draw + 1))
+
+    save_root = Path(save_root)
+    log_dir = log_dir_for(save_root)
+    run_config = build_run_config(reestimate_central_pressure, convert_wind_to_knots)
+    print(f"Output: {save_root} | run config: {run_config}")
+
+    # Before anything is written: refuse results from a different run config.
+    check_existing_results(
+        draws, save_root, log_dir, run_config, overwrite_okay,
+        source_id, variant_label, experiment_id, batch_year, basin,
+    )
 
     draw_args = [
         (
@@ -1563,26 +1817,55 @@ def main(
             basin,
             draw,
             save_root,
+            log_dir,
+            reestimate_central_pressure,
+            convert_wind_to_knots,
+            overwrite_okay,
         )
         for draw in draws
     ]
 
-    run_parallel(
+    failed_by_draw = run_parallel(
         runner=process_single_draw,
         arg_list=draw_args,
         num_cores=num_cores,
     )
 
+    incomplete = {d: f for d, f in zip(draws, failed_by_draw) if f}
+    if incomplete:
+        # Non-zero exit so Jobmon marks the task failed and retries it; the
+        # retry skips completed storms and only recomputes the failed ones.
+        print(f"❌ {len(incomplete)} draw(s) incomplete: {incomplete}")
+        raise SystemExit(1)
+
     print("🎉 All draws completed.")
 
 
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run CLIMADA code")
 
-main(
-    source_id=source_id,
-    variant_label=variant_label,
-    experiment_id=experiment_id,
-    batch_year=batch_year,
-    basin=basin,
-    draw_batch=draw_batch,
-    num_cores=num_cores,
-)
+    # Define arguments
+    parser.add_argument("--source_id", type=str, required=True, help="Source Id")
+    parser.add_argument("--variant_label", type=str, required=True, help="Variant Label")
+    parser.add_argument("--experiment_id", type=str, required=True, help="Experiment Id")
+    parser.add_argument("--batch_year", type=str, required=True, help="Batch Year")
+    parser.add_argument("--basin", type=str, required=True, help="Basin")
+    parser.add_argument("--draw_batch", type=str, required=True, help="Draw batch (e.g., '0-9')")
+    parser.add_argument("--num_cores", type=int, default=1, help="Number of cores to use for parallel processing")
+    add_run_option_args(parser)
+
+    args = parser.parse_args()
+
+    main(
+        source_id=args.source_id,
+        variant_label=args.variant_label,
+        experiment_id=args.experiment_id,
+        batch_year=args.batch_year,
+        basin=args.basin,
+        draw_batch=args.draw_batch,
+        num_cores=args.num_cores,
+        save_root=args.output_path,
+        reestimate_central_pressure=args.reestimate_central_pressure,
+        convert_wind_to_knots=args.convert_wind_to_knots,
+        overwrite_okay=args.overwrite_okay,
+    )

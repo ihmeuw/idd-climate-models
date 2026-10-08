@@ -1,5 +1,5 @@
 """
-Generate storm_draw_admin1_count.parquet
+Generate storm_draw_admin1_count_v3.parquet
 
 For each (storm_draw, source_id, variant_label, experiment_id, batch_year, basin) task:
   - n_storms_in_batch: count of storm_XXXX dirs in the base stage1 zarr
@@ -13,7 +13,7 @@ Intersection with the PAF raster therefore counts only FHS admin1 regions
 that a storm actually touches — storms that don't reach any FHS admin1
 polygon produce a count of 0 but are still included in the output.
 
-Output: /mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin1_count.parquet
+Output: /mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin1_count_v3.parquet
 """
 
 from pathlib import Path
@@ -34,6 +34,7 @@ from shapely.geometry import (  # type: ignore
     box,
     shape,
 )
+import shapely.affinity  # type: ignore
 from shapely.ops import unary_union  # type: ignore
 
 # ── Paths ────────────────────────────────────────────────────────────────────
@@ -47,13 +48,13 @@ GDF_PATH = Path(
     "/mnt/team/rapidresponse/pub/tropical-storms/data/global_shapefile/global_WGS84_admin1_0_360.parquet"
 )
 PAF_ROOT = Path(
-    "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage2_v2/"
+    "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage2_v3/"
 )
 STAGE1_ROOT = Path(
-    "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage1_v2"
+    "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage1_v3"
 )
 OUTPUT_PATH = Path(
-    "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin1_count.parquet"
+    "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin1_count_v3.parquet"
 )
 
 NUM_CORES = 64
@@ -222,7 +223,32 @@ def build_full_tasks_df() -> pd.DataFrame:
 
 # ── Per-row processor ─────────────────────────────────────────────────────────
 
+_WEST_OF_180 = box(-360, -90, 180, 90)
+_EAST_OF_180 = box(180, -90, 540, 90)
+
+
+def normalize_longitudes(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Move 0-360 geometries to -180..180 for the NA basin, whose PAF rasters
+    are -180..180. Same as `normalize_longitudes` in 03_admin_level_paf_main.py:
+    shapes straddling 180 are cut there and only the eastern part is shifted."""
+    def shift_geom(geom):
+        if geom is None or geom.is_empty:
+            return geom
+        minx, _, maxx, _ = geom.bounds
+        if maxx <= 180:
+            return geom
+        if minx >= 180:
+            return shapely.affinity.translate(geom, xoff=-360)
+        west = geom.intersection(_WEST_OF_180)
+        east = shapely.affinity.translate(geom.intersection(_EAST_OF_180), xoff=-360)
+        return _polygonize(unary_union([west, east]))
+    gdf = gdf.copy()
+    gdf["geometry"] = gdf["geometry"].apply(shift_geom)
+    return gdf
+
+
 shapefile: gpd.GeoDataFrame = gpd.read_parquet(GDF_PATH)
+shapefile_na: gpd.GeoDataFrame = normalize_longitudes(shapefile)
 
 
 def process_row(row: pd.Series) -> list[dict[str, Any]]:
@@ -244,7 +270,8 @@ def process_row(row: pd.Series) -> list[dict[str, Any]]:
     )
     raw_paf_raster = clean_paf_raster(raw_paf_raster)
 
-    intersected = intersect_shapefile_with_raster(shapefile, raw_paf_raster)
+    basin_shapes = shapefile_na if params["basin"] == "NA" else shapefile
+    intersected = intersect_shapefile_with_raster(basin_shapes, raw_paf_raster)
     num_admin1_first_year = intersected["ADM1_CODE"].nunique()
 
     del raw_paf_raster, intersected

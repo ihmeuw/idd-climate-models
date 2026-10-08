@@ -5,10 +5,12 @@ import pyarrow.parquet as pq  # type: ignore
 from jobmon.client.tool import Tool  # type: ignore
 from pathlib import Path
 
+from stage1_run_config import require_stage1_complete
+
 # ── Admin level ───────────────────────────────────────────────────────────────
 # Set to 0 or 1. Controls output root, task filtering, and the --admin_level
 # flag passed to the main script.
-ADMIN_LEVEL = 1
+ADMIN_LEVEL = 0
 
 # ── Completion scan ───────────────────────────────────────────────────────────
 # True  — walk the output tree to skip already-completed draws (normal mode).
@@ -18,11 +20,11 @@ CHECK_COMPLETION = False
 DRAW_BATCHES = [f"{i}-{i}" for i in range(100)]
 
 SAVE_ROOT = Path(
-    f"/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage4a_metadata_admin{ADMIN_LEVEL}"
+    f"/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage4a_metadata_v3_admin{ADMIN_LEVEL}"
 )
 
 ADMIN1_META_PARQUET = Path(
-    "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin1_count.parquet"
+    "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin1_count_v3.parquet"
 )
 _UNIQUE_KEYS = ["source_id", "variant_label", "experiment_id", "batch_year", "basin"]
 
@@ -151,6 +153,14 @@ if CHECK_COMPLETION:
 else:
     remaining_tasks = full_tasks.copy().reset_index(drop=True)
     print(f"Completion scan skipped — submitting all {len(remaining_tasks):,} tasks.")
+
+# A missing stage 1 store reads as "no landfalling storms", so refuse to
+# submit until stage 1 has finished every draw we are about to process.
+require_stage1_complete(set(
+    remaining_tasks[
+        ["source_id", "variant_label", "experiment_id", "batch_year", "basin", "draw"]
+    ].itertuples(index=False, name=None)
+))
 
 #######################################################################
 project = "proj_rapidresponse"

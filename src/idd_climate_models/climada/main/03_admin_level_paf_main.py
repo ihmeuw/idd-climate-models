@@ -10,6 +10,7 @@ import argparse
 import traceback
 from rra_tools.parallel import run_parallel  # type: ignore
 import shapely  # type: ignore
+import shapely.affinity  # type: ignore
 from shapely.geometry import (
     box,
     shape,
@@ -52,7 +53,7 @@ admin_level = args.admin_level
 
 
 # Constants
-PAF_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage2_v2/")
+PAF_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage2_v3/")
 GRIDED_POP_PATH = Path("/mnt/team/rapidresponse/pub/population-model/results/2026_05_16/")
 POP_TOTALS_PATH = Path("/mnt/team/rapidresponse/pub/tropical-storms/fhs_population_2023_all_years.parquet")
 ANTIMERIDIAN = LineString([(180, -90), (180, 90)])
@@ -60,11 +61,11 @@ ANTIMERIDIAN = LineString([(180, -90), (180, 90)])
 _SHP_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/data/global_shapefile")
 
 if admin_level == 0:
-    SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage3_v2/")
+    SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage3_v3/")
     GDF_PATH = _SHP_ROOT / "global_WGS84_admin0.parquet"
     SHP_ROOT_NORMALIZED = _SHP_ROOT / "global_WGS84_admin0_normalized.parquet"
 elif admin_level == 1:
-    SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage3_v2_admin1/")
+    SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage3_v3_admin1/")
     GDF_PATH = _SHP_ROOT / "global_WGS84_admin1_0_360.parquet"
     # admin1 is already FHS-filtered so no special-region merging is needed.
     # For NA basin the 0-360 file is normalized to -180..180 at load time.
@@ -75,21 +76,47 @@ else:
 ##############################
 #     Helper Functions       #
 ##############################
+def to_pm180(geom):
+    """Translate a 0-360 geometry lying entirely east of 180 back to -180..180.
+
+    Used before reprojecting a piece's bbox to CEA: pyproj maps lon 180 to
+    +20,037 km but lon 181 to about -19,900 km, so a piece spanning 180..182
+    would otherwise yield a globe-wide (40,075 km) population window.
+    """
+    if geom.is_empty or geom.bounds[0] < 180:
+        return geom
+    return shapely.affinity.translate(geom, xoff=-360)
+
+
 def normalize_geom_to_0_360(geom):
     """Shift WGS84 geometry from -180–180 to 0–360 for clipping against 0–360 raster."""
     def shift_x(x, y, _z=None):
         return x + 360 if x < 0 else x, y
     return shapely.ops.transform(shift_x, geom)
 
+_WEST_OF_180 = box(-360, -90, 180, 90)
+_EAST_OF_180 = box(180, -90, 540, 90)
+
+
 def normalize_longitudes(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """Shift geometries with x > 180 to x - 360 to avoid wraparound issues."""
+    """Move 0-360 geometries to -180..180.
+
+    Geometries entirely east of 180 are translated by -360. Geometries that
+    straddle 180 (e.g. Russia's Chukotka ring, Antarctica) are cut at 180
+    first and only the eastern part is translated; shifting vertex-by-vertex
+    would instead turn such a ring into an invalid shape spanning 360°.
+    """
     def shift_geom(geom):
-        if geom.is_empty:
+        if geom is None or geom.is_empty:
             return geom
-        def shift_coords(x, y, z=None):
-            x_new = x - 360 if x > 180 else x
-            return (x_new, y) if z is None else (x_new, y, z)
-        return shapely.ops.transform(shift_coords, geom)
+        minx, _, maxx, _ = geom.bounds
+        if maxx <= 180:
+            return geom
+        if minx >= 180:
+            return shapely.affinity.translate(geom, xoff=-360)
+        west = geom.intersection(_WEST_OF_180)
+        east = shapely.affinity.translate(geom.intersection(_EAST_OF_180), xoff=-360)
+        return _polygonize(unary_union([west, east]))
     gdf = gdf.copy()
     gdf["geometry"] = gdf["geometry"].apply(shift_geom)
     return gdf
@@ -373,6 +400,37 @@ def intersect_shapefile_with_raster(
 ##########################################
 #            Save Functions              #
 ##########################################
+def _year_paf_path(
+    storm_draw: str,
+    source_id: str,
+    variant_label: str,
+    sample_name: str,
+    relative_risk: str,
+    experiment_id: str,
+    batch_year: str,
+    year: int,
+    basin: str,
+    save_root: Path = SAVE_ROOT,
+) -> Path:
+    """Path to one year's PAF parquet. The launcher's `_stage3_paf_path` must match."""
+    start_year, end_year = batch_year.split("-")
+    return (
+        save_root / storm_draw / source_id / variant_label / experiment_id
+        / batch_year / basin / str(year) / "paf_df"
+        / (
+            f"paf_{storm_draw}_{relative_risk}_{sample_name}_{basin}_"
+            f"{source_id}_{experiment_id}_{variant_label}_{start_year}01_{end_year}12_{year}.parquet"
+        )
+    )
+
+
+def _no_intersection_marker_path(paf_path: Path) -> Path:
+    """Written instead of the parquet when no admin intersects the year's PAF
+    raster, so the year counts as complete without a parquet (anything that
+    globs *.parquet still sees no file for that year, as before)."""
+    return paf_path.with_suffix(".no_intersection")
+
+
 def save_batch_paf_dataframe(
     paf_df: pd.DataFrame,
     storm_draw: str,
@@ -395,25 +453,11 @@ def save_batch_paf_dataframe(
         - total_population
         - population_weighted_paf
     """
-    year = str(year)
-    save_dir = (
-        save_root
-        / storm_draw
-        / source_id
-        / variant_label
-        / experiment_id
-        / batch_year
-        / basin
-        / year
-        / "paf_df"
+    save_path = _year_paf_path(
+        storm_draw, source_id, variant_label, sample_name, relative_risk,
+        experiment_id, batch_year, year, basin, save_root,
     )
-    save_dir.mkdir(parents=True, exist_ok=True)
-
-
-    start_year, end_year = batch_year.split("-")
-
-    filename = f"paf_{storm_draw}_{relative_risk}_{sample_name}_{basin}_{source_id}_{experiment_id}_{variant_label}_{start_year}01_{end_year}12_{year}.parquet"
-    save_path = save_dir / filename
+    save_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Optional: enforce consistent column order
     preferred_cols = [
@@ -452,32 +496,19 @@ def check_if_year_complete(
     basin: str,
     save_root: Path = SAVE_ROOT,
 ) -> bool:
-    """Return True if the yearly PAF Parquet exists and is valid.
-    
+    """Return True if the yearly PAF Parquet exists and is valid, or the year
+    has a no-intersection marker.
+
     Returns False if missing, empty, zero-byte, or corrupt.
     """
-    year = str(year)
-
-    save_dir = (
-        save_root
-        / storm_draw
-        / source_id
-        / variant_label
-        / experiment_id
-        / batch_year
-        / basin
-        / year
-        / "paf_df"
+    save_path = _year_paf_path(
+        storm_draw, source_id, variant_label, sample_name, relative_risk,
+        experiment_id, batch_year, year, basin, save_root,
     )
 
-    start_year, end_year = batch_year.split("-")
-
-    filename = (
-        f"paf_{storm_draw}_{relative_risk}_{sample_name}_{basin}_"
-        f"{source_id}_{experiment_id}_{variant_label}_{start_year}01_{end_year}12_{year}.parquet"
-    )
-
-    save_path = save_dir / filename
+    # 0. No admin intersects this year's raster: complete without a parquet.
+    if _no_intersection_marker_path(save_path).exists():
+        return True
 
     # 1. File must exist
     if not save_path.exists():
@@ -544,7 +575,13 @@ def split_antimeridian_geom(geom_cea):
 ##########################################
 #            MAIN FUNCTION               #
 ##########################################
-def process_single_year(args):
+def process_single_year(args) -> list:
+    """
+    Compute and save one year's per-admin PAF parquet. Returns the location
+    ids of admins that raised; if any did, the year is NOT saved (a parquet
+    missing those admins would read as "no exposure" downstream) so the
+    year stays incomplete and is recomputed on retry.
+    """
     (
         storm_draw,
         source_id,
@@ -570,7 +607,7 @@ def process_single_year(args):
         basin,
     ):
         print(f"Skipping year {year} (already complete)")
-        return
+        return []
 
     # load shapefile and population once per year
     if basin == "NA":
@@ -603,15 +640,22 @@ def process_single_year(args):
     )
 
     if len(intersected_shapes) == 0:
-        print(f"No intersected shapes for year {year}, basin {basin}. Skipping.")
+        print(f"No intersected shapes for year {year}, basin {basin}; writing no-intersection marker.")
+        marker = _no_intersection_marker_path(_year_paf_path(
+            storm_draw, source_id, variant_label, sample_name, relative_risk,
+            experiment_id, batch_year, year, basin,
+        ))
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
         del raw_paf_raster, pop_df, shapefile
-        return
+        return []
 
     # Reproject once
     intersected_shapes = reproject_shapefile_to_equal_area(intersected_shapes)
 
     print(f"Processing year {year} with {len(intersected_shapes)} intersected shapes")
 
+    failed_admins = []
     for admin_shape in intersected_shapes.itertuples(index=False):
 
         admin_id = getattr(admin_shape, "loc_id", None)
@@ -648,7 +692,7 @@ def process_single_year(args):
 
                 # Intersect and clip
                 intersection = piece_wgs84.intersection(raster_bounds)
-                intersection_gdf = gpd.GeoDataFrame(geometry=[intersection], crs="EPSG:4326")
+                intersection_gdf = gpd.GeoDataFrame(geometry=[to_pm180(intersection)], crs="EPSG:4326")
                 intersection_cea = intersection_gdf.to_crs("ESRI:54034").iloc[0].geometry
                 intersection_cea_bounds = intersection_cea.bounds
 
@@ -724,12 +768,20 @@ def process_single_year(args):
                 f"{batch_year}/{basin}): {type(e).__name__}: {e}"
             )
             traceback.print_exc()
+            failed_admins.append(admin_id)
             continue
 
     # ----------------------------
     # Final cleanup
     # ----------------------------
     del raw_paf_raster, intersected_shapes, shapefile, pop_df
+
+    if failed_admins:
+        print(
+            f"❌ Year {year}: {len(failed_admins)} admin(s) failed {failed_admins}; "
+            f"not saving the year."
+        )
+        return failed_admins
 
     final_paf_df = (
         pd.DataFrame.from_records(paf_records)
@@ -751,6 +803,7 @@ def process_single_year(args):
     )
 
     del paf_records, final_paf_df
+    return []
 
 def main(
     storm_draw: str,
@@ -784,13 +837,20 @@ def main(
         for year in years
     ]
 
-    run_parallel(
+    failed_by_year = run_parallel(
         runner=process_single_year,
         arg_list=year_args,
         num_cores=num_cores,   # tune based on memory
         progress_bar=True,
     )
     print(f"parallel tasks done")
+
+    incomplete = {y: f for y, f in zip(years, failed_by_year) if f}
+    if incomplete:
+        # Non-zero exit so Jobmon retries (max_attempts / resource scaling are
+        # set in the launcher); the retry recomputes only the unsaved years.
+        print(f"❌ {len(incomplete)} year(s) not saved; failed admins by year: {incomplete}")
+        raise SystemExit(1)
 
 
 main(

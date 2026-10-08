@@ -4,10 +4,12 @@ from jobmon.client.tool import Tool  # type: ignore
 from pathlib import Path
 import numpy as np
 
+from stage1_run_config import require_stage1_complete
+
 RELATIVE_RISKS = ["indirect_resp_draw", "indirect_cvd_draw"]
 
 ROOT_PATH = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/input/cmip6/")
-SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage2_v2/")
+SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage2_v3/")
 
 
 def _stage2_paf_path(
@@ -212,6 +214,18 @@ print(
     f"Completion scan: {completed_mask.sum()} / {len(final_long)} tasks "
     f"already done on disk; {len(remaining_long)} tasks to submit."
 )
+
+# Each task reads all 100 stage 1 draws of its combo (`draws = list(range(100))`
+# in the main), and a missing stage 1 store reads as "no storms", so refuse to
+# submit until stage 1 has finished every one of them.
+stage1_combos = remaining_long[
+    ["source_id", "variant_label", "experiment_id", "batch_year", "basin"]
+].drop_duplicates()
+require_stage1_complete({
+    (*combo, draw)
+    for combo in stage1_combos.itertuples(index=False, name=None)
+    for draw in range(100)
+})
 
 # Reruns: triple the budgeted runtime relative to the resource_usage parquet.
 # (Empirical: invalidated single-year recomputes inside main() still re-run
