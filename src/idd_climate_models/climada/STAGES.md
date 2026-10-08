@@ -439,12 +439,16 @@ depending on filesystem load. File permissions are set to `0o775` on write.
 
 ### Known limitations
 
-- **NA uses −180..180 shapes** (fixed 2026-10-08), matching the NA PAF
-  rasters and Stage 3: admin 0 reads `global_WGS84_admin0_normalized.parquet`,
-  admin 1 normalizes the 0–360 file at load (same `normalize_longitudes` as
-  Stage 3). Before the fix only the sliver where 0–360 shapes overlap the NA
-  raster was counted (one v2 NA raster: admin 0 5 → 43, admin 1 3 → 63), so NA
-  tasks landed in the smallest resource bin.
+- **NA counts are undercounted.** Both scripts intersect 0–360 shapefiles
+  with every basin's PAF raster, but NA rasters are in −180..180, so only the
+  sliver where the two overlap is counted (admin 0 median 5 vs dozens of real
+  NA locations; admin 1 median 2). This affects resource binning only: NA
+  tasks land in the ≤ 100 bin. Task enumeration is unaffected.
+  Left as is on purpose: the Stage 3 resource bins were profiled with these
+  counts, and correct NA counts (one v2 NA raster: admin 0 5 → 43, admin 1
+  3 → 63) would move NA into the > 100 bin, which has a shorter runtime
+  (admin 1 5 vs 8 min, admin 0 35 vs 50 min). Fix the counts and re-profile
+  the bins together.
 - **Draw 0 must have a Stage 1 intensity store** for every combination;
   otherwise `count_storms_in_batch` raises `FileNotFoundError` and the whole
   run fails (`run_parallel` has no per-row error handling).

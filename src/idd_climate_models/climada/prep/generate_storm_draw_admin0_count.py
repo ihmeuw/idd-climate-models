@@ -40,10 +40,6 @@ STORM_DRAW_TABLE_PATH = Path(
 GDF_PATH = Path(
     "/mnt/team/rapidresponse/pub/tropical-storms/data/global_shapefile/global_WGS84_admin0.parquet"
 )
-# NA PAF rasters are -180..180; stage 3 uses this pre-normalized file for NA.
-GDF_PATH_NA = Path(
-    "/mnt/team/rapidresponse/pub/tropical-storms/data/global_shapefile/global_WGS84_admin0_normalized.parquet"
-)
 PAF_ROOT = Path(
     "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage2_v3/"
 )
@@ -221,7 +217,6 @@ def build_full_tasks_df() -> pd.DataFrame:
 # ── Per-row processor ─────────────────────────────────────────────────────────
 
 shapefile: gpd.GeoDataFrame = gpd.read_parquet(GDF_PATH)
-shapefile_na: gpd.GeoDataFrame = gpd.read_parquet(GDF_PATH_NA)
 
 
 def process_row(row: pd.Series) -> list[dict[str, Any]]:
@@ -243,8 +238,7 @@ def process_row(row: pd.Series) -> list[dict[str, Any]]:
     )
     raw_paf_raster = clean_paf_raster(raw_paf_raster)
 
-    basin_shapes = shapefile_na if params["basin"] == "NA" else shapefile
-    intersected = intersect_shapefile_with_raster(basin_shapes, raw_paf_raster)
+    intersected = intersect_shapefile_with_raster(shapefile, raw_paf_raster)
     num_admin0_first_year = intersected["ADM0_CODE"].nunique()
 
     del raw_paf_raster, intersected

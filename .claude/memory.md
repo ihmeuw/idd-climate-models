@@ -54,9 +54,11 @@ central pressure needs replacing.
   for every draw they submit (require_stage1_complete in stage1_run_config.py);
   stage 3 writes `.no_intersection` markers for years with no admin hit;
   4B post-processing NUM_CORES=40 and resume signature includes 4B sentinels;
-  prep counts use -180..180 shapes for NA; deleted
+  deleted
   03_admin_level_paf_launcher_modifed_memory.py (git rm). STAGES.md updated.
-- stage1_run_config.py is untracked: must be committed with the launchers.
+- NA prep-count fix was reverted: correct NA counts would move NA into stage 3's
+  >100 resource bin (shorter runtime) that was profiled on the old counts.
+- All committed on feature/mfiking/climada_06_03_2026 (not pushed).
 
 ## Next Steps
 1. User reviews; decides output path (stage1_v3 not yet run; stages 2-4 read stage1_v3).
