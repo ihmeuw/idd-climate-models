@@ -1,6 +1,6 @@
 # Claude Session Memory
 
-**Last Updated:** 2026-10-08
+**Last Updated:** 2026-10-08 (stage 1 launched)
 
 ## Current Task
 CLIMADA stage 1 (v3): option to re-estimate central pressure with CLIMADA's
@@ -61,9 +61,10 @@ central pressure needs replacing.
 - All committed on feature/mfiking/climada_06_03_2026 (not pushed).
 
 ## Next Steps
-1. User reviews; decides output path (stage1_v3 not yet run; stages 2-4 read stage1_v3).
-2. Run one draw, then the launcher.
-3. Commit.
+1. Stage 1 launched by the user 2026-10-08 with --reestimate_central_pressure
+   into stage1_v3. Re-run the launcher until it reports 0 batches to submit.
+2. Stage 2 launcher (now also runs the stage 3 count generators as downstream
+   tasks), then stage 3 admin 0/1, then 4A -> 4B at admin 0/1.
 
 ## Resume Prompt
 ```

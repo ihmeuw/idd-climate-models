@@ -345,6 +345,61 @@ if tasks:
 else:
     print("⚠️ No tasks added to workflow. Check task generation.")
 
+############################################################################################
+# Downstream: the Stage 3 count parquets (storm_draw_admin{0,1}_count_v3).
+# Each generator reads the first-year CVD rasters of 8 representative storm
+# draws plus the draw-0 Stage 1 stores, so it runs once every Stage 2 task in
+# this workflow has succeeded (immediately if none were submitted). Added
+# only when its parquet is missing (delete it to regenerate), and only for
+# PRIORITY_MODE "all": the representative draws are not all priority draws.
+PREP_DIR = Path(__file__).resolve().parent.parent / "prep"
+COUNT_JOBS = {
+    level: (
+        PREP_DIR / f"generate_storm_draw_admin{level}_count.py",
+        Path(
+            "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/"
+            f"storm_draw_admin{level}_count_v3.parquet"
+        ),
+    )
+    for level in (0, 1)
+}
+
+count_template = tool.get_task_template(
+    template_name="CLIMADA_stage2_admin_counts",
+    default_cluster_name="slurm",
+    default_compute_resources={
+        "queue": "all.q",
+        "cores": 64,  # the generators run_parallel over 64 cores
+        "memory": "64G",
+        "runtime": "120m",
+        "project": project,
+    },
+    default_resource_scales={
+        "memory": 1.5,
+        "runtime": 1.5,
+    },
+    max_attempts=2,
+    command_template="python {count_script}",
+    node_args=["count_script"],
+)
+
+count_tasks = []
+for level, (count_script, count_parquet) in COUNT_JOBS.items():
+    if PRIORITY_MODE != "all":
+        print(f"⚠️ PRIORITY_MODE={PRIORITY_MODE!r}: not adding the admin{level} count task.")
+    elif count_parquet.exists():
+        print(f"Admin{level} counts already exist at {count_parquet}; not regenerating.")
+    else:
+        count_tasks.append(count_template.create_task(
+            name=f"CLIMADA_stage2_admin{level}_counts",
+            upstream_tasks=tasks,
+            count_script=str(count_script),
+        ))
+
+if count_tasks:
+    workflow.add_tasks(count_tasks)
+    print(f"✅ {len(count_tasks)} Stage 3 count task(s) added downstream of the Stage 2 tasks.")
+
 try:
     workflow.bind()
 except Exception as e:

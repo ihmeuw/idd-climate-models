@@ -429,6 +429,10 @@ The two scripts are otherwise identical.
 
 ### How to run
 
+Normally nothing to run: the Stage 2 launcher adds both generators as
+downstream tasks of the Stage 2 workflow (see **Stage 2 → Launcher**). To run
+them by hand, from `prep/`:
+
 ```shell
 python generate_storm_draw_admin0_count.py
 python generate_storm_draw_admin1_count.py
@@ -844,6 +848,14 @@ differ only in the RR sample. Launcher scope: the task combinations minus the
   in **seconds** (the comment says 60 minutes), so they land in the 5-minute
   bucket (15 min after ×3).
 - `PRIORITY_MODE = "all"`: every storm draw, with `PRIORITY_DRAWS` first.
+- **Downstream Stage 3 count tasks** (`CLIMADA_stage2_admin{0,1}_counts`):
+  one task per admin level runs `prep/generate_storm_draw_admin{N}_count.py`
+  after every Stage 2 task in the workflow succeeds (immediately if none were
+  submitted). 64 cores, 64 G, 120 min, `max_attempts = 2`, retry scaling
+  memory and runtime ×1.5. Added only when that level's
+  `storm_draw_admin{N}_count_v3.parquet` is missing (delete it to regenerate)
+  and only for `PRIORITY_MODE = "all"`, because the generators read 8
+  representative storm draws that are not all priority draws.
 
 ### CLI
 
