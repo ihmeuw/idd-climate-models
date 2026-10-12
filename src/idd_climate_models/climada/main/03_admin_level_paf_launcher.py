@@ -396,7 +396,8 @@ print("For full information see the Jobmon GUI:")
 print(f"https://jobmon-gui.ihme.washington.edu/#/workflow/{workflow.workflow_id}")
 
 try:
-    status = workflow.run()
+    # 5 days; Jobmon's default (10 h) stopped the first stage 1 run mid-way.
+    status = workflow.run(seconds_until_timeout=5 * 24 * 3600)
     print(f"Workflow {workflow.workflow_id} completed with status {status}.")
 except Exception as e:
     print(f"❌ Workflow submission failed: {e}")
