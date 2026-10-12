@@ -592,6 +592,15 @@ All outputs live under
 | Landfall parquet | `metadata/<source>/<variant>/<exp>/<batch_year>/<basin>/landfall_locations/landfall_<basin>_<source>_<exp>_<variant>_<start>01_<end>12<draw_text>/storm_NNNN.parquet` |
 | Draw completion marker | `../stage1_v3_log/draw_completion_markers/<source>/<variant>/<exp>/<batch_year>/<basin>/draw_NNNN.json` |
 
+**Narrow land footprints (fixed 2026-10-12, mid-run of workflow 635223).** A land-clipped
+footprint can be a single row or column of pixels (small islands). `compute_storm_landfall_locations`
+did not pad it before `to_raster`: a **single row** raised `IndexError`, failing the draw on every
+attempt (18,831 FATAL tasks); a **single column** gave a NaN pixel width, so the storm's landfall
+parquet was written **empty** although its zarr groups were saved. The function now pads with
+`ensure_min_grid`. Parquets written empty before the fix are repaired after the run by
+`main/backfill_landfall_locations.py` (dry run by default; `--apply` once every draw has a marker).
+Intensity and exposure values were never affected.
+
 Conventions:
 - `<draw_text>` is empty for draw 0; otherwise `_e{draw-1}` (CMIP ensemble member suffix).
 - Zarr group key per storm is `storm_{storm_index:04d}` (4-digit zero-padded).

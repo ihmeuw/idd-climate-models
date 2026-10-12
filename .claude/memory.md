@@ -60,6 +60,39 @@ central pressure needs replacing.
   >100 resource bin (shorter runtime) that was profiled on the old counts.
 - All committed on feature/mfiking/climada_06_03_2026 (not pushed).
 
+## Production v3 check (2026-10-09, notebook section 7)
+- 4,421 stage 1 draws done (AU, SI, NA, EP) at time of check, all with the
+  CLIMADA-fit run config. Section 7 compares completed v3 storms with v2.
+- v2 NA output is mostly 0-360 lon (v3: -180..180) and ~68% of v2 storms have
+  stretched grids; section 7 normalizes and flags these.
+- CMCC-ESM2/historical/2001-2005/NA: v3 code + ensemble pressure reproduces v2
+  exactly (storm_0032); with CLIMADA pressure footprints grow (median +42% land
+  pixels on clean-grid storms, peak +3 m/s). v2-only landfalls all stretched-grid;
+  of 10 v3-only, 3 land with ensemble too, 7 only with the deeper CLIMADA pressure.
+
+## Mid-run check (2026-10-10, notebook section 8)
+- 188,120 / 366,800 draws done, all markers CLIMADA-fit config. Sample of 224
+  draws: bookkeeping/contents clean; v3 vs v2 consistent with pressure change.
+- Known quirk: storms whose land footprint is 1 row/column get an empty landfall
+  parquet (to_raster dlon NaN in compute_storm_landfall_locations); zarrs fine,
+  nothing downstream reads landfall parquets. Fix = ensure_min_grid before
+  to_raster there; not applied mid-run.
+- Backfill prepared (2026-10-10): climada/main/backfill_landfall_locations.py
+  (dry run default; --apply only once all 366,800 draws have markers; atomic
+  rewrite) + tests/test_climada_landfall_backfill.py (9 pass). Plan: run
+  --apply after workflow 635223 finishes, THEN add ensure_min_grid to
+  compute_storm_landfall_locations in 01_climada_intensity_main.py.
+- 10,560 SLURM TIMEOUTs (EP/WP mostly); retries resume per storm.
+
+## FATAL tasks + fix (2026-10-12)
+- Workflow 635223: 18,831 FATAL (EP 9,221, WP 6,422, ...), all exit code 1.
+  Cause: 1-ROW land footprint -> to_raster IndexError in
+  compute_storm_landfall_locations (1-COLUMN case = silent empty parquet).
+  Sampled 261 fatal tasks: every unfinished draw has a 1-row orphan intensity
+  group. Fixed: ensure_min_grid at top of compute_storm_landfall_locations.
+  Verified on a scratch copy of EP draw 96. Then: resume workflow (cold, no
+  SLURM jobs exist), backfill 1-column empties after the run.
+
 ## Next Steps
 1. Stage 1 launched by the user 2026-10-08 with --reestimate_central_pressure
    into stage1_v3. Re-run the launcher until it reports 0 batches to submit.

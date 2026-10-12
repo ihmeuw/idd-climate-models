@@ -1037,6 +1037,12 @@ def compute_storm_landfall_locations(
 
     start_date = getattr(storm_intensity, "start_date", None)
 
+    # A land-clipped footprint can be a single row or column. to_raster needs
+    # at least 2 cells per axis: a single row raises IndexError, and a single
+    # column gives a NaN pixel width, so every clip below fails and no record
+    # is written. Pad as check_storm_landfall does.
+    storm_intensity = ensure_min_grid(storm_intensity)
+
     raster = to_raster(
         ds=storm_intensity,
         no_data_value=np.nan,
