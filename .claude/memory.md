@@ -93,6 +93,13 @@ central pressure needs replacing.
   Verified on a scratch copy of EP draw 96. Then: resume workflow (cold, no
   SLURM jobs exist), backfill 1-column empties after the run.
 
+## Last 37 EP draws (2026-10-12)
+- Workflow 637013 (climada_env) finished all but 37 EP draws (CMCC/MRI, long
+  storms 410-714 steps). Dense windfield n_time x 843,804 centroids x 2 float64
+  -> one storm peaks ~22 GB (measured 586 steps, 474 s); 5 draws/35G task OOMs,
+  pool hangs to TIMEOUT. Launcher got --draws_per_batch/--memory_gb/--runtime_min;
+  relaunch: --draws_per_batch 1 --memory_gb 64 --runtime_min 1440.
+
 ## Next Steps
 1. Stage 1 launched by the user 2026-10-08 with --reestimate_central_pressure
    into stage1_v3. Re-run the launcher until it reports 0 batches to submit.

@@ -20,6 +20,14 @@ from stage1_run_config import (
 # Run options are passed verbatim to every task (see stage1_run_config.py).
 parser = argparse.ArgumentParser(description="Launch CLIMADA stage 1 (intensity) tasks")
 add_run_option_args(parser)
+# Launcher-only resource overrides (not passed to tasks). Example, for draws whose
+# long storms run 5-draw tasks out of memory:
+#   --draws_per_batch 1 --memory_gb 80 --runtime_min 1440
+parser.add_argument("--draws_per_batch", type=int, default=5,
+                    help="draws per task; each task uses one core per draw")
+parser.add_argument("--memory_gb", type=int, default=None, help="memory per task (default 35)")
+parser.add_argument("--runtime_min", type=int, default=None,
+                    help="runtime per task (default: binned by storm count)")
 args = parser.parse_args()
 
 RUN_CONFIG = build_run_config(args.reestimate_central_pressure, args.convert_wind_to_knots)
@@ -41,9 +49,9 @@ if subprocess.run([_python, "-c", "import climada"], capture_output=True).return
 print(f"Tasks will run with {_python}")
 
 DRAWS_TOTAL = 100
-DRAWS_PER_BATCH = 5
+DRAWS_PER_BATCH = args.draws_per_batch
 DRAW_BATCHES = [
-    f"{i}-{i + DRAWS_PER_BATCH - 1}"
+    f"{i}-{min(i + DRAWS_PER_BATCH, DRAWS_TOTAL) - 1}"
     for i in range(0, DRAWS_TOTAL, DRAWS_PER_BATCH)
 ]
 
@@ -106,18 +114,21 @@ def run_storm_count_parallel(task_df: pd.DataFrame) -> pd.DataFrame:
 def assign_run_resources(df: pd.DataFrame) -> pd.DataFrame:
     """
     Vectorized resource assignment.
-    Fixed per-task: cores=5, memory=35G.
-    Runtime is binned from empirical performance + a 10-minute safety buffer.
+    Per task: one core per draw, 35G (or --memory_gb).
+    Runtime is binned from empirical performance + a 10-minute safety buffer
+    (or --runtime_min).
     """
     df = df.copy()
-    df["num_cores"] = 5
-    df["memory_req"] = "35G"
+    df["num_cores"] = DRAWS_PER_BATCH
+    df["memory_req"] = f"{args.memory_gb or 35}G"
 
     # Right-open bins: (-inf, 15], (15, 30], (30, 70], (70, 120], (120, 180], (180, inf)
     bin_edges = [-float("inf"), 15, 30, 70, 120, 180, float("inf")]
     base_runtimes = [40, 50, 80, 120, 190, 250]
     bin_idx = pd.cut(df["num_tracks"], bins=bin_edges, labels=False, include_lowest=True)
     df["max_run_time"] = pd.Series(base_runtimes)[bin_idx].to_numpy() + 10
+    if args.runtime_min:
+        df["max_run_time"] = args.runtime_min
     return df
 
 
