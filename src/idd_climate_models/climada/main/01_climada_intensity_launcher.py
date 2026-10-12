@@ -1,5 +1,7 @@
 import argparse
 import json
+import shutil
+import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 import pandas as pd  # type: ignore
@@ -29,6 +31,14 @@ RUN_OPTION_FLAGS = " ".join(
     ] if on
 )
 print(f"Output: {args.output_path} | run config: {RUN_CONFIG}")
+
+# Tasks run `python 01_climada_intensity_main.py` with this shell's environment.
+# From a conda env without CLIMADA (e.g. rrapopmodel) every task fails on
+# import within seconds, so check before submitting anything.
+_python = shutil.which("python")
+if subprocess.run([_python, "-c", "import climada"], capture_output=True).returncode != 0:
+    raise SystemExit(f"❌ `python` here ({_python}) cannot import climada. Activate climada_env and rerun.")
+print(f"Tasks will run with {_python}")
 
 DRAWS_TOTAL = 100
 DRAWS_PER_BATCH = 5
