@@ -132,5 +132,36 @@ class TestBackfill(unittest.TestCase):
         self.assertFalse((self.root / "_landfall_backfill_tmp").exists())
 
 
+    def test_jobmon_steps_end_to_end(self):
+        """scan shards -> fix shards -> summarize, as the launcher wires them."""
+        import json
+        run_dir = self.tmp / "run"
+        run_dir.mkdir()
+        (run_dir / "config.json").write_text(json.dumps(
+            {"save_root": str(self.root), "apply": True, "n_scan_shards": 2, "n_fix_shards": 2}))
+        for i in range(2):
+            bf.step_scan(run_dir, i)
+        scan = bf._read_shards(run_dir, "scan", 2)
+        self.assertEqual(scan[["storm_id", "kind"]].values.tolist(), [[0, "affected"]])
+        for i in range(2):
+            bf.step_fix(run_dir, i)
+        bf.step_summarize(run_dir)
+        report = pd.read_csv(run_dir / "report.csv", keep_default_na=False)
+        self.assertEqual(report[["basin", "storm_id", "status", "n_records"]].values.tolist(), [["AU", 0, "rewritten", 1]])
+        self.assertEqual(len(self.parquet(0)), 1)
+
+    def test_fix_step_refuses_apply_with_unfinished_draws(self):
+        import json
+        stage1._draw_log_path(log_dir_for(self.root), "draw_completion_markers", *KEY).unlink()
+        run_dir = self.tmp / "run"
+        run_dir.mkdir()
+        (run_dir / "config.json").write_text(json.dumps(
+            {"save_root": str(self.root), "apply": True, "n_scan_shards": 1, "n_fix_shards": 1}))
+        bf.step_scan(run_dir, 0)
+        with self.assertRaises(SystemExit):
+            bf.step_fix(run_dir, 0)
+        self.assertEqual(len(self.parquet(0)), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
