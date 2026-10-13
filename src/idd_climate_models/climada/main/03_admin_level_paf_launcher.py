@@ -1,7 +1,6 @@
 import subprocess
 import sys
 import uuid
-import numpy as np  # type: ignore
 import pandas as pd  # type: ignore
 from jobmon.client.tool import Tool  # type: ignore
 from pathlib import Path
@@ -25,13 +24,14 @@ if ADMIN_LEVEL == 0:
         "n_storms_in_batch", "estimated_storms_per_year", "year",
         "num_admin0_first_year", "num_years_in_batch", "estimated_admin0_total",
     ]
-    _ESTIMATED_TOTAL_COL = "estimated_admin0_total"
-    # Derived from workflow 584066 (8 priority draws): observed max 88G / 45min.
-    # Memory capped at 50G; ×2 retry gives 100G on attempt 2.
-    _RESOURCE_TABLE = pd.DataFrame([
-        {"resource_bin": "heavy", "memory_gb_assigned": 50, "runtime_min_assigned": 50},
-        {"resource_bin": "light", "memory_gb_assigned": 50, "runtime_min_assigned": 35},
-    ])
+    # basin: (memory GB, runtime min). v2 admin 0 peak memory / longest task
+    # (runtime summed over attempts), workflows 584230/584480/584688:
+    # AU 37.4G/46m, EP 87.8G/54m (every sampled EP task OOMed at 50G), NA 46.0G/49m,
+    # NI 16.5G/33m, SI 23.6G/22m, SP 32.4G/19m, WP 28.3G/44m.
+    _BASIN_RESOURCES = {
+        "AU": (43, 55), "EP": (101, 65), "NA": (53, 60), "NI": (19, 40),
+        "SI": (28, 30), "SP": (38, 25), "WP": (33, 55),
+    }
 elif ADMIN_LEVEL == 1:
     SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage3_v3_admin1/")
     META_PARQUET = Path(
@@ -42,25 +42,17 @@ elif ADMIN_LEVEL == 1:
         "n_storms_in_batch", "estimated_storms_per_year", "year",
         "num_admin1_first_year", "num_years_in_batch", "estimated_admin1_total",
     ]
-    _ESTIMATED_TOTAL_COL = "estimated_admin1_total"
-    # Admin1 resources from priority draw profiling.
-    # heavy (0–100): max 3.61G / 7min  → 4G / 8min
-    # light (100+):  max 9.80G / 4min  → 10G / 5min
-    # default (estimated_admin1_total == 0, SP/SI tasks with storms in later
-    # years but no year-1 admin1 intersection): 8G / 8min
-    _RESOURCE_TABLE = pd.DataFrame([
-        {"resource_bin": "heavy", "memory_gb_assigned": 4, "runtime_min_assigned": 8},
-        {"resource_bin": "light", "memory_gb_assigned": 10, "runtime_min_assigned": 5},
-    ])
-    DEFAULT_MAX_RUN_TIME_MIN = 8
-    DEFAULT_MEMORY_GB = 8
+    # Same, v2 admin 1 workflows 589680/589842: AU 2.2G/5m, EP 6.2G/24m,
+    # NA 3.0G/16m and NI 10.0G/16m (both pinned at their 3G/10G limits),
+    # SI 1.1G/0.5m, SP 1.0G/0.4m, WP 6.0G/14m.
+    _BASIN_RESOURCES = {
+        "AU": (3, 6), "EP": (8, 29), "NA": (4, 20), "NI": (12, 20),
+        "SI": (2, 5), "SP": (2, 5), "WP": (7, 17),
+    }
 else:
     raise ValueError(f"ADMIN_LEVEL must be 0 or 1, got {ADMIN_LEVEL!r}")
 
 UNIQUE_KEYS = ["source_id", "variant_label", "experiment_id", "batch_year", "basin"]
-
-_RESOURCE_BINS   = [0, 100, np.inf]
-_RESOURCE_LABELS = ["heavy", "light"]
 
 if not META_PARQUET.exists():
     print(f"Metadata parquet not found at {META_PARQUET}. Running generation script...")
@@ -121,29 +113,22 @@ def task_is_complete(row) -> bool:
     return True
 
 
-# Resource constants applied uniformly to every task. (A piecewise-linear
-# estimator scaled by admin0 count + batch length used to live here; it's
-# preserved in git history. Reintroduce only if memory / runtime profiling
-# justifies the complexity.)
+# Resources are set per basin: in v2 profiling the basin, not the estimated
+# admin count, decided memory (the old heavy/light bins on the estimated total
+# asked 50G for every admin 0 task). _BASIN_RESOURCES ~ v2 peak memory x1.15
+# and longest task x1.2; retries scale memory x1.25 / runtime x1.75, and a
+# retry skips years already written.
 DEFAULT_NUM_CORES = 1
-DEFAULT_MAX_RUN_TIME_MIN = 10
-DEFAULT_MEMORY_GB = 10
 
 
 def assign_resources(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+    unknown = set(df["basin"]) - set(_BASIN_RESOURCES)
+    if unknown:
+        raise ValueError(f"No stage 3 resources for basin(s) {sorted(unknown)}")
     df["num_cores"] = DEFAULT_NUM_CORES
-    df["max_run_time"] = DEFAULT_MAX_RUN_TIME_MIN
-    df["memory_gb"] = DEFAULT_MEMORY_GB
-    df["resource_bin"] = pd.cut(
-        df[_ESTIMATED_TOTAL_COL], bins=_RESOURCE_BINS, labels=_RESOURCE_LABELS, right=True
-    ).astype(str)
-    df = df.merge(_RESOURCE_TABLE, on="resource_bin", how="left")
-    matched = df["memory_gb_assigned"].notna()
-    df.loc[matched, "memory_gb"] = df.loc[matched, "memory_gb_assigned"].astype(int)
-    df.loc[matched, "max_run_time"] = df.loc[matched, "runtime_min_assigned"].astype(int)
-    df = df.drop(columns=["resource_bin", "memory_gb_assigned", "runtime_min_assigned"])
-    print(f"Resources: {matched.sum()} tasks from table, {(~matched).sum()} using defaults.")
+    df["memory_gb"] = df["basin"].map(lambda b: _BASIN_RESOURCES[b][0]).astype(int)
+    df["max_run_time"] = df["basin"].map(lambda b: _BASIN_RESOURCES[b][1]).astype(int)
     print(
         f"Memory range: {df['memory_gb'].min()}G-{df['memory_gb'].max()}G | "
         f"Runtime: {df['max_run_time'].min()}-{df['max_run_time'].max()} min"

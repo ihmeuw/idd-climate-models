@@ -1,6 +1,6 @@
 # Claude Session Memory
 
-**Last Updated:** 2026-10-08 (stage 1 launched)
+**Last Updated:** 2026-10-13 (stage 3 respec done)
 
 ## Current Task
 CLIMADA stage 1 (v3): option to re-estimate central pressure with CLIMADA's
@@ -100,15 +100,38 @@ central pressure needs replacing.
   pool hangs to TIMEOUT. Launcher got --draws_per_batch/--memory_gb/--runtime_min;
   relaunch: --draws_per_batch 1 --memory_gb 64 --runtime_min 1440.
 
+## Resource respec (2026-10-12)
+- Stage 1 done (366,800/366,800), validated; landfall backfill apply ~done.
+- Stage 2: 3 cores/10 workers (a195abe); pilot 637734 OK; full run going.
+- 4A: 120 min tasks, x1.5 retry (686b53a). User will not run 4A for now.
+- Output roots renamed (02886fd): stage3_v3_admin{0,1}/, stage4b_v3_admin{0,1}/.
+- 4B (d82a24e): ADMIN_LEVEL = 1; ADMIN1_MEMORY_GB {3:9,4:9,5:10,10:12,29:20}
+  (admin 1 baseline ~7.3 GB); runtime request 0.75x packed estimate (v2 max
+  0.69x). Post-processing left 40c/100G/240m. Profile in STAGES.md.
+
+## Status check (2026-10-13 08:40)
+- Backfill apply 637726: fix shards all done, 2,276/2,276 `rewritten`;
+  summarize task queued (Priority) -> writes report.csv.
+- Stage 2 637740: 18,333/90,797 draws done, ~2,000 running. CPU efficiency fell
+  0.71 -> 0.09 (I/O-bound); 4,068 timeouts (37% of finished core-hours),
+  retries x1.5. User chose NOT to cap concurrency. ~1,250 done/h now.
+
+## Stage 3 respec (2026-10-13)
+- v2 admin0 wfs 583912/584066/584230/584480/584688 (584230+ match the 50G
+  bins), admin1 589639/589651/589680/589842. ~2,900 sampled tasks.
+- Memory follows basin, not estimated admin count. Launcher now uses
+  _BASIN_RESOURCES per level (peak x1.15, longest x1.2); bins removed.
+  Admin0 EP needs ~88G (100% OOM at 50G in v2).
+
 ## Next Steps
-1. Stage 1 launched by the user 2026-10-08 with --reestimate_central_pressure
-   into stage1_v3. Re-run the launcher until it reports 0 batches to submit.
-2. Stage 2 launcher (now also runs the stage 3 count generators as downstream
-   tasks), then stage 3 admin 0/1, then 4A -> 4B at admin 0/1.
+1. Stage 2 (637740) finishing -> count tasks -> launch stage 3 admin 0 and
+   admin 1 (ADMIN_LEVEL edited by hand in 03 launcher).
+2. Backfill summarize task writes report.csv (fix shards: 2,276 rewritten).
+3. 4A (admin 1) when the user decides; then 4B (ADMIN_LEVEL = 1).
 
 ## Resume Prompt
 ```
-Continuing idd-climate-models CLIMADA v3 work: stage 1 can re-estimate central
-pressure with CLIMADA's fit (--reestimate_central_pressure). Code + tests done
-and uncommitted. See .claude/memory.md for findings and next steps.
+Continuing idd-climate-models CLIMADA v3 rerun (non-ensemble central pressure).
+Stage 1 done; stage 2 running; 4A/4B resources tightened and committed. Next:
+respec stage 3 resources from v2 workflows. See .claude/memory.md.
 ```

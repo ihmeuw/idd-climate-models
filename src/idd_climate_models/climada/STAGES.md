@@ -446,13 +446,10 @@ depending on filesystem load. File permissions are set to `0o775` on write.
 - **NA counts are undercounted.** Both scripts intersect 0–360 shapefiles
   with every basin's PAF raster, but NA rasters are in −180..180, so only the
   sliver where the two overlap is counted (admin 0 median 5 vs dozens of real
-  NA locations; admin 1 median 2). This affects resource binning only: NA
-  tasks land in the ≤ 100 bin. Task enumeration is unaffected.
-  Left as is on purpose: the Stage 3 resource bins were profiled with these
-  counts, and correct NA counts (one v2 NA raster: admin 0 5 → 43, admin 1
-  3 → 63) would move NA into the > 100 bin, which has a shorter runtime
-  (admin 1 5 vs 8 min, admin 0 35 vs 50 min). Fix the counts and re-profile
-  the bins together.
+  NA locations; admin 1 median 2). Task enumeration is unaffected.
+  Stage 3 resources are now set per basin (2026-10-13), so the counts no
+  longer affect them; only the logged metrics are off for NA (one v2 NA
+  raster: admin 0 5 → 43, admin 1 3 → 63).
 - **Draw 0 must have a Stage 1 intensity store** for every combination;
   otherwise `count_storms_in_batch` raises `FileNotFoundError` and the whole
   run fails (`run_parallel` has no per-row error handling).
@@ -1395,20 +1392,34 @@ rerun):
 - `"all"` — submit every storm_draw; tasks are ordered round-robin across
   models by storm-draw rank.
 
-Resources: 1 core. Memory/runtime come from a two-bin table keyed on
-`estimated_admin{N}_total` from the metadata parquet (`pd.cut` bins
-`(0, 100]` → `"heavy"`, `(100, ∞)` → `"light"`):
+Resources: 1 core. Memory/runtime come from `_BASIN_RESOURCES`, one
+(memory, runtime) entry per basin and admin level (2026-10-13; this replaced
+the heavy/light bins on `estimated_admin{N}_total`, which asked 50 G for every
+admin 0 task):
 
-| Level | `(0, 100]` | `> 100` | `0` or missing |
-|---|---|---|---|
-| 0 | 50 G / 50 min | 50 G / 35 min | 10 G / 10 min |
-| 1 | 4 G / 8 min | 10 G / 5 min | 10 G / 10 min |
+| Level | AU | EP | NA | NI | SI | SP | WP |
+|---|---|---|---|---|---|---|---|
+| 0 | 43 G / 55 min | 101 G / 65 min | 53 G / 60 min | 19 G / 40 min | 28 G / 30 min | 38 G / 25 min | 33 G / 55 min |
+| 1 | 3 G / 6 min | 8 G / 29 min | 4 G / 20 min | 12 G / 20 min | 2 G / 5 min | 2 G / 5 min | 7 G / 17 min |
 
-Notes: the admin 1 block sets 8 G / 8 min defaults, but the
-`DEFAULT_MAX_RUN_TIME_MIN` / `DEFAULT_MEMORY_GB = 10` lines after the
-`ADMIN_LEVEL` block override them, so the effective default is 10 G / 10 min.
-The `"heavy"` label is on the smaller bin. Retries scale memory ×1.25 and
-runtime ×1.75 (`default_resource_scales`), up to `max_attempts = 5`.
+Retries scale memory ×1.25 and runtime ×1.75 (`default_resource_scales`), up
+to `max_attempts = 5`; a retry skips years already written.
+
+Profile (v2, 2026-10-13): admin 0 workflows 584230/584480/584688 and admin 1
+589680/589842, ~2,900 sampled tasks (jobmon usage + sacct MaxRSS), runtime
+summed over attempts. Memory follows the basin, not the estimated admin count:
+
+| Level | AU | EP | NA | NI | SI | SP | WP |
+|---|---|---|---|---|---|---|---|
+| 0 peak GB | 37.4 | 87.8 | 46.0 | 16.5 | 23.6 | 32.4 | 28.3 |
+| 0 longest min | 46 | 54 | 49 | 33 | 22 | 19 | 44 |
+| 1 peak GB | 2.2 | 6.2 | 3.0* | 10.0* | 1.1 | 1.0 | 6.0 |
+| 1 longest min | 5 | 24 | 16 | 16 | 0.5 | 0.4 | 14 |
+
+\* pinned at the v2 request (3 G / 10 G), so given extra room. Every sampled
+admin 0 EP task was OOM-killed at 50 G on its first attempt. Table values are
+about peak ×1.15 and longest ×1.2. In v2 the admin 1 "default" tasks (no
+year-1 intersection; SI/SP) asked 10 G / 10 min and used 1 G / 0.4 min.
 
 ### Verification (2026-10-08)
 
