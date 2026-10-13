@@ -1,3 +1,4 @@
+import argparse
 import uuid
 import numpy as np
 import pandas as pd  # type: ignore
@@ -7,10 +8,15 @@ from pathlib import Path
 
 from stage1_run_config import require_stage1_complete
 
-# ── Admin level ───────────────────────────────────────────────────────────────
-# Set to 0 or 1. Controls output root, task filtering, and the --admin_level
-# flag passed to the main script.
-ADMIN_LEVEL = 0
+# ── Admin levels ──────────────────────────────────────────────────────────────
+# One workflow runs every requested level. Each level has its own output root,
+# grouped-task parquet and resource-assignment task; with the default "0 1",
+# admin 1's tasks wait for admin 0 (including its resource assignment) to finish.
+parser = argparse.ArgumentParser(description="Launch stage 4A for one or both admin levels")
+parser.add_argument("--admin_levels", type=int, nargs="+", default=[0, 1], choices=[0, 1],
+                    help="levels to run, in order (default: 0 then 1)")
+args = parser.parse_args()
+ADMIN_LEVELS = list(dict.fromkeys(args.admin_levels))
 
 # ── Completion scan ───────────────────────────────────────────────────────────
 # True  — walk the output tree to skip already-completed draws (normal mode).
@@ -19,22 +25,20 @@ ADMIN_LEVEL = 0
 CHECK_COMPLETION = False
 DRAW_BATCHES = [f"{i}-{i}" for i in range(100)]
 
-SAVE_ROOT = Path(
-    f"/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage4a_metadata_v3_admin{ADMIN_LEVEL}"
-)
 
-ADMIN1_META_PARQUET = Path(
-    "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin1_count_v3.parquet"
-)
-_UNIQUE_KEYS = ["source_id", "variant_label", "experiment_id", "batch_year", "basin"]
+def save_root_for(admin_level: int) -> Path:
+    return Path(
+        f"/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage4a_metadata_v3_admin{admin_level}"
+    )
+
 
 TASK_RUNTIME_MIN = 5
 TASK_MEMORY_GB = 5
 MAX_GROUP_RUNTIME_MIN = 60
-GROUPED_PARQUET_DIR = SAVE_ROOT / "_workflow_grouped_tasks"
 
 
 def _stage4a_draw_metadata_path(
+    save_root: Path,
     source_id: str,
     variant_label: str,
     experiment_id: str,
@@ -47,7 +51,7 @@ def _stage4a_draw_metadata_path(
     draw_text = "" if draw == 0 else f"_e{draw - 1}"
     start_year, end_year = batch_year.split("-")
     return (
-        SAVE_ROOT
+        save_root
         / source_id / variant_label / experiment_id / batch_year / basin
         / f"tc_risk_draw_{draw}" / "admin_level_metadata"
         / (
@@ -57,15 +61,15 @@ def _stage4a_draw_metadata_path(
     )
 
 
-def _gather_completed_tasks() -> set[tuple]:
+def _gather_completed_tasks(save_root: Path) -> set[tuple]:
     """Walk the output tree once to find all valid admin_level_metadata parquets.
     A single rglob is far faster than 30k individual NFS stat calls.
     Files < 1KB are skipped (likely truncated from an interrupted write).
     Files that open cleanly via pyarrow are validated; corrupt files are excluded."""
     completed: set[tuple] = set()
-    if not SAVE_ROOT.exists():
+    if not save_root.exists():
         return completed
-    for path in SAVE_ROOT.rglob("admin_level_metadata/admin_level_metadata_*.parquet"):
+    for path in save_root.rglob("admin_level_metadata/admin_level_metadata_*.parquet"):
         if path.stat().st_size < 1024:
             continue
         try:
@@ -74,9 +78,9 @@ def _gather_completed_tasks() -> set[tuple]:
                 continue
         except Exception:
             continue
-        # Path structure: SAVE_ROOT/source_id/variant_label/experiment_id/
+        # Path structure: save_root/source_id/variant_label/experiment_id/
         #                 batch_year/basin/tc_risk_draw_{draw}/admin_level_metadata/file
-        parts = path.relative_to(SAVE_ROOT).parts
+        parts = path.relative_to(save_root).parts
         if len(parts) < 7:
             continue
         try:
@@ -137,27 +141,10 @@ full_tasks = (
 full_tasks["draw"] = full_tasks["draw_batch"].str.split("-").str[0].astype(int)
 full_tasks = full_tasks.drop(columns=["draw_batch"])
 
-############################################################################################
-# Completion scan — skipped when CHECK_COMPLETION=False (fresh run / NFS latency).
-# When skipped, each worker's check_if_draw_is_complete handles per-draw resume.
-if CHECK_COMPLETION:
-    print("Scanning completed tasks...")
-    completed_keys = _gather_completed_tasks()
-    print(f"Found {len(completed_keys):,} valid parquets on disk.")
-    completed_mask = full_tasks.apply(lambda row: task_is_complete(row, completed_keys), axis=1)
-    remaining_tasks = full_tasks[~completed_mask].copy().reset_index(drop=True)
-    print(
-        f"Completion scan: {completed_mask.sum()} / {len(full_tasks)} tasks "
-        f"already done on disk; {len(remaining_tasks)} tasks to submit."
-    )
-else:
-    remaining_tasks = full_tasks.copy().reset_index(drop=True)
-    print(f"Completion scan skipped — submitting all {len(remaining_tasks):,} tasks.")
-
 # A missing stage 1 store reads as "no landfalling storms", so refuse to
 # submit until stage 1 has finished every draw we are about to process.
 require_stage1_complete(set(
-    remaining_tasks[
+    full_tasks[
         ["source_id", "variant_label", "experiment_id", "batch_year", "basin", "draw"]
     ].itertuples(index=False, name=None)
 ))
@@ -171,10 +158,11 @@ RESOURCE_ASSIGNMENT_SCRIPT = (
     Path(__file__).resolve().parent / "04_admin_level_exposure_a_resource_assignment.py"
 )
 
-tool = Tool(name=f"CLIMADA_stage4a_admin{ADMIN_LEVEL}")
+tool = Tool(name="CLIMADA_stage4a")
 
+levels_name = "_".join(f"admin{level}" for level in ADMIN_LEVELS)
 workflow = tool.create_workflow(
-    name=f"CLIMADA_stage4a_admin{ADMIN_LEVEL}_{wf_uuid}",
+    name=f"CLIMADA_stage4a_{levels_name}_{wf_uuid}",
     max_concurrently_running=3000,
 )
 
@@ -190,104 +178,124 @@ workflow.set_default_compute_resources_from_dict(
     }
 )
 
-# --- Group assignment and per-group task creation ---
-tasks = []
 
-if not remaining_tasks.empty:
-    grouped_df = assign_groups(remaining_tasks, MAX_GROUP_RUNTIME_MIN)
+def level_tasks(admin_level: int, upstream: list) -> tuple[list, object]:
+    """Group tasks + resource-assignment task for one admin level.
 
-    GROUPED_PARQUET_DIR.mkdir(parents=True, exist_ok=True)
-    grouped_parquet_path = GROUPED_PARQUET_DIR / f"grouped_tasks_{wf_uuid}.parquet"
-    grouped_df.to_parquet(grouped_parquet_path, index=False)
-    print(f"✅ Grouped task list saved → {grouped_parquet_path}")
+    Group tasks start after `upstream`; resource assignment after all of them
+    (immediately if every draw is already complete on disk)."""
+    save_root = save_root_for(admin_level)
+    print(f"\n── Admin {admin_level} → {save_root}")
 
-    n_groups = grouped_df["group_id"].nunique()
-    avg_tasks = len(grouped_df) / n_groups
-    print(
-        f"\nGroup summary: {n_groups:,} groups from {len(grouped_df):,} tasks "
-        f"(avg {avg_tasks:.1f} tasks/group, "
-        f"max {MAX_GROUP_RUNTIME_MIN // TASK_RUNTIME_MIN} draws/group)"
-    )
+    # Completion scan — skipped when CHECK_COMPLETION=False (fresh run / NFS latency).
+    # When skipped, each worker's check_if_draw_is_complete handles per-draw resume.
+    if CHECK_COMPLETION:
+        print("Scanning completed tasks...")
+        completed_keys = _gather_completed_tasks(save_root)
+        print(f"Found {len(completed_keys):,} valid parquets on disk.")
+        completed_mask = full_tasks.apply(lambda row: task_is_complete(row, completed_keys), axis=1)
+        remaining_tasks = full_tasks[~completed_mask].copy().reset_index(drop=True)
+        print(
+            f"Completion scan: {completed_mask.sum()} / {len(full_tasks)} tasks "
+            f"already done on disk; {len(remaining_tasks)} tasks to submit."
+        )
+    else:
+        remaining_tasks = full_tasks.copy().reset_index(drop=True)
+        print(f"Completion scan skipped — submitting all {len(remaining_tasks):,} tasks.")
 
-    # All stage-4A tasks share one resource class — a single template suffices.
-    runtime_str = f"{int(np.ceil(MAX_GROUP_RUNTIME_MIN / 10) * 10)}m"
-    memory_str = f"{TASK_MEMORY_GB}G"
+    tasks = []
+    if not remaining_tasks.empty:
+        grouped_df = assign_groups(remaining_tasks, MAX_GROUP_RUNTIME_MIN)
 
-    task_template = tool.get_task_template(
-        template_name=f"CLIMADA_stage4a_admin{ADMIN_LEVEL}_{memory_str}_{runtime_str}",
+        grouped_parquet_dir = save_root / "_workflow_grouped_tasks"
+        grouped_parquet_dir.mkdir(parents=True, exist_ok=True)
+        grouped_parquet_path = grouped_parquet_dir / f"grouped_tasks_{wf_uuid}.parquet"
+        grouped_df.to_parquet(grouped_parquet_path, index=False)
+        print(f"✅ Grouped task list saved → {grouped_parquet_path}")
+
+        n_groups = grouped_df["group_id"].nunique()
+        print(
+            f"Group summary: {n_groups:,} groups from {len(grouped_df):,} tasks "
+            f"(avg {len(grouped_df) / n_groups:.1f} tasks/group, "
+            f"max {MAX_GROUP_RUNTIME_MIN // TASK_RUNTIME_MIN} draws/group)"
+        )
+
+        # All stage-4A tasks share one resource class — a single template suffices.
+        runtime_str = f"{int(np.ceil(MAX_GROUP_RUNTIME_MIN / 10) * 10)}m"
+        memory_str = f"{TASK_MEMORY_GB}G"
+
+        task_template = tool.get_task_template(
+            template_name=f"CLIMADA_stage4a_admin{admin_level}_{memory_str}_{runtime_str}",
+            default_cluster_name="slurm",
+            default_compute_resources={
+                "queue": "all.q",
+                "cores": 1,
+                "memory": memory_str,
+                "runtime": runtime_str,
+                "project": project,
+            },
+            default_resource_scales={
+                "memory": 1.5,
+                "runtime": 3.0,
+            },
+            max_attempts=5,
+            command_template=(
+                f"python {MAIN_SCRIPT} "
+                f"--grouped_tasks_parquet {grouped_parquet_path} "
+                "--group_id {group_id} "
+                f"--admin_level {admin_level}"
+            ),
+            node_args=["group_id"],
+        )
+
+        for group_id in range(n_groups):
+            tasks.append(task_template.create_task(
+                name=f"CLIMADA_stage4a_admin{admin_level}_group_{group_id}",
+                group_id=group_id,
+                upstream_tasks=upstream,
+            ))
+        print(f"Number of group tasks: {len(tasks)}")
+    else:
+        print("ℹ️ No group tasks to submit (all complete on disk).")
+
+    # Resource-assignment downstream task fires once all per-(combo × draw)
+    # groups of this level are done (or right after `upstream` if none).
+    resource_assignment_template = tool.get_task_template(
+        template_name=f"CLIMADA_stage4a_admin{admin_level}_resource_assignment",
         default_cluster_name="slurm",
         default_compute_resources={
             "queue": "all.q",
-            "cores": 1,
-            "memory": memory_str,
-            "runtime": runtime_str,
+            "cores": 40,
+            "memory": "20G",
+            "runtime": "60m",
             "project": project,
         },
         default_resource_scales={
             "memory": 1.5,
-            "runtime": 3.0,
+            "runtime": 2.0,
         },
-        max_attempts=5,
+        max_attempts=2,
         command_template=(
-            f"python {MAIN_SCRIPT} "
-            f"--grouped_tasks_parquet {grouped_parquet_path} "
-            "--group_id {group_id} "
-            f"--admin_level {ADMIN_LEVEL}"
+            f"python {RESOURCE_ASSIGNMENT_SCRIPT} "
+            f"--admin_level {admin_level}"
         ),
-        node_args=["group_id"],
+        node_args=[],
     )
-
-    for group_id in range(n_groups):
-        task = task_template.create_task(
-            name=f"CLIMADA_stage4a_group_{group_id}",
-            group_id=group_id,
-        )
-        tasks.append(task)
-
-    print(f"Number of group tasks: {len(tasks)}")
-
-
-# Resource-assignment downstream task fires once all per-(combo × draw) groups
-# are done. When resume filters tasks to empty it still runs (no upstreams =
-# fires immediately).
-resource_assignment_template = tool.get_task_template(
-    template_name=f"CLIMADA_stage4a_admin{ADMIN_LEVEL}_resource_assignment",
-    default_cluster_name="slurm",
-    default_compute_resources={
-        "queue": "all.q",
-        "cores": 40,
-        "memory": "20G",
-        "runtime": "60m",
-        "project": project,
-    },
-    default_resource_scales={
-        "memory": 1.5,
-        "runtime": 2.0,
-    },
-    max_attempts=2,
-    command_template=(
-        f"python {RESOURCE_ASSIGNMENT_SCRIPT} "
-        f"--admin_level {ADMIN_LEVEL}"
-    ),
-    node_args=[],
-)
-
-resource_assignment_task = resource_assignment_template.create_task(
-    name=f"CLIMADA_stage4a_admin{ADMIN_LEVEL}_resource_assignment",
-    upstream_tasks=tasks,
-)
-
-if tasks:
-    workflow.add_tasks(tasks)
-    print(f"✅ {len(tasks)} group tasks added to workflow.")
-else:
-    print(
-        "ℹ️ No group tasks to submit (all complete on disk); "
-        "resource-assignment will fire immediately."
+    resource_assignment_task = resource_assignment_template.create_task(
+        name=f"CLIMADA_stage4a_admin{admin_level}_resource_assignment",
+        upstream_tasks=tasks or upstream,
     )
+    return tasks, resource_assignment_task
 
-workflow.add_tasks([resource_assignment_task])
-print("✅ Resource-assignment downstream task added to workflow.")
+
+# Levels run in order: each level's group tasks wait for the previous level's
+# resource assignment, so admin 1 starts only once admin 0 is fully done.
+upstream: list = []
+for admin_level in ADMIN_LEVELS:
+    tasks, resource_assignment_task = level_tasks(admin_level, upstream)
+    workflow.add_tasks(tasks + [resource_assignment_task])
+    print(f"✅ Admin {admin_level}: {len(tasks)} group tasks + resource assignment added.")
+    upstream = [resource_assignment_task]
 
 try:
     workflow.bind()

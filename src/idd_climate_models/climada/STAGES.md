@@ -1510,9 +1510,10 @@ Stage 4 has four pieces, run as two Jobmon workflows:
    downstream task in the 4B workflow. It reads every expected Part B
    parquet (paths built from the 4A inventory) into one consolidated parquet.
 
-Order: 4A launcher (4A groups → resource assignment) → 4B launcher (4B
-groups → post-processing). Both launchers take `ADMIN_LEVEL` (currently
-**0**); run the pair once per admin level.
+Order: 4A launcher (admin 0 groups → resource assignment → admin 1 groups →
+resource assignment, one workflow) → 4B launcher (4B groups → post-processing).
+The 4B launcher still takes `ADMIN_LEVEL` (currently **0**) and runs once per
+admin level, after that level's 4A resource assignment has finished.
 
 ### Provenance of the production outputs
 
@@ -1603,6 +1604,12 @@ storm's intensity footprint intersects. The output defines **which**
 
 #### Launcher (`04_admin_level_exposure_a_launcher.py`)
 
+- **Both admin levels in one workflow** (since 2026-10-13): `--admin_levels`
+  (default `0 1`). Each level gets its own group tasks, grouped-task parquet
+  under its own `stage4a_metadata_v3_admin{N}/` and resource-assignment task;
+  admin 1's group tasks are downstream of admin 0's resource assignment, so
+  admin 1 starts once admin 0 is fully done (and does not start if admin 0
+  ends with FATAL tasks). `--admin_levels 1` runs one level alone.
 - Task list: `level_4_task_assignments.csv` combos (1965–1969 baseline
   excluded) × draws 0..99 = 361,200 draws.
 - Draws are packed **12 per Jobmon task** (`MAX_GROUP_RUNTIME_MIN = 60` /
@@ -1616,8 +1623,8 @@ storm's intensity footprint intersects. The output defines **which**
   a Stage 1 completion marker (`require_stage1_complete` in
   `stage1_run_config.py`): a missing Stage 1 store reads as "no landfalling
   storms", so running early would mark incomplete draws as done.
-- Adds the resource-assignment task downstream of every group (it fires
-  immediately if there are no groups).
+- Adds each level's resource-assignment task downstream of that level's groups
+  (it fires right after the previous level if a level has no groups).
 
 #### CLI
 
