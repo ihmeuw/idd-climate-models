@@ -1,3 +1,4 @@
+import gdal_env  # noqa: F401  (sets GDAL_DATA/PROJ_DATA before rasterio is used)
 from pathlib import Path
 from typing import NamedTuple
 import xarray as xr  # type: ignore
