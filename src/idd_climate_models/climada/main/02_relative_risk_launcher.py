@@ -1,3 +1,4 @@
+import argparse
 import uuid
 import pandas as pd  # type: ignore
 from jobmon.client.tool import Tool  # type: ignore
@@ -5,6 +6,21 @@ from pathlib import Path
 import numpy as np
 
 from stage1_run_config import require_stage1_complete
+
+parser = argparse.ArgumentParser(description="Launch CLIMADA stage 2")
+parser.add_argument("--pilot", type=int, default=0,
+                    help="submit only ~N tasks (spread over basins, profiled runtime <= "
+                         "PILOT_MAX_RUNTIME_MIN) to check resources; no count tasks")
+args = parser.parse_args()
+
+# Resources. v2 measured (March 2026): peak memory <= 3.2 GB; the 10 parallel
+# draws keep only ~1.2 cores busy on average (CPU time / (elapsed x 10 cores)
+# = 0.12) because they mostly wait on zarr reads. So request 3 cores but keep
+# 10 worker processes (--num_cores 10): the reads still overlap and 70% less
+# CPU sits idle.
+TASK_CORES = 3
+WORKERS = 10
+PILOT_MAX_RUNTIME_MIN = 20
 
 RELATIVE_RISKS = ["indirect_resp_draw", "indirect_cvd_draw"]
 
@@ -142,8 +158,8 @@ resource_df = resource_df.rename(columns={
 
 # assign 4GB
 resource_df["memory_req"] = "4G"
-# assign 10 cores
-resource_df["num_cores"] = 10
+# worker processes per task (SLURM cores: TASK_CORES)
+resource_df["num_cores"] = WORKERS
 resource_df = resource_df.drop_duplicates(subset=["source_id", "variant_label", "experiment_id", "batch_year", "basin"])
 
 # merge with main df
@@ -155,7 +171,7 @@ final_df = df.merge(
 # fill any na maxrun_time with 60 minutes, memory_req with 4G, num_cores with 10
 final_df["max_run_time"] = final_df["max_run_time"].fillna(30)
 final_df["memory_req"] = final_df["memory_req"].fillna("4G")
-final_df["num_cores"] = final_df["num_cores"].fillna(10)
+final_df["num_cores"] = final_df["num_cores"].fillna(WORKERS)
 
 
 # Vectorized runtime bucketing (seconds): right-edge bins map to a small set
@@ -215,6 +231,19 @@ print(
     f"already done on disk; {len(remaining_long)} tasks to submit."
 )
 
+if args.pilot:
+    # A quick resource check: about N tasks spread over the basins, all with a
+    # short profiled runtime, including each basin's longest such combo.
+    short = remaining_long[remaining_long["runtime_min"] <= PILOT_MAX_RUNTIME_MIN]
+    per_basin = max(1, -(-args.pilot // short["basin"].nunique()))
+    remaining_long = (
+        short.sort_values("runtime_min", ascending=False)
+        .groupby("basin", group_keys=False)
+        .apply(lambda g: pd.concat([g.head(1), g.iloc[1:].sample(min(len(g) - 1, per_basin - 1), random_state=0)]))
+    )
+    print(f"PILOT: {len(remaining_long)} tasks, profiled runtime <= {PILOT_MAX_RUNTIME_MIN} min "
+          f"(by basin: {remaining_long['basin'].value_counts().to_dict()})")
+
 # Each task reads all 100 stage 1 draws of its combo (`draws = list(range(100))`
 # in the main), and a missing stage 1 store reads as "no storms", so refuse to
 # submit until stage 1 has finished every one of them.
@@ -247,7 +276,7 @@ tool = Tool(name="CLIMADA_stage2")
 
 # Create a workflow, and set the executor
 workflow = tool.create_workflow(
-    name=f"CLIMADA_stage2_{wf_uuid}",
+    name=f"CLIMADA_stage2_{'pilot_' if args.pilot else ''}{wf_uuid}",
     # max_concurrently_running = 100,
 )
 
@@ -273,13 +302,13 @@ unique_configs = remaining_long[['max_run_time', 'num_cores', 'memory_req']].dro
 task_templates = {}
 for _, config in unique_configs.iterrows():
     config_key = f"{config['max_run_time']}_{config['num_cores']}_{config['memory_req']}"
-    
+
     task_templates[config_key] = tool.get_task_template(
-        template_name=f"CLIMADA_stage2_{config_key}",
+        template_name=f"CLIMADA_stage2_{config['max_run_time']}m_{config['num_cores']}w_{TASK_CORES}c_{config['memory_req']}",
         default_cluster_name="slurm",
         default_compute_resources={
             "queue": "all.q",
-            "cores": config['num_cores'],
+            "cores": TASK_CORES,
             "memory": config['memory_req'],
             "runtime": f"{int(config['max_run_time'])}m",
             "project": project,
@@ -321,7 +350,7 @@ for row in remaining_long.itertuples():
             f"{row.sample_name}_"
             f"rt{row.max_run_time}m_"
             f"mem{row.memory_req}_"
-            f"c{row.num_cores}"
+            f"w{row.num_cores}_c{TASK_CORES}"
         ),
         storm_draw=row.storm_draw,
         source_id=row.source_id,
@@ -385,7 +414,9 @@ count_template = tool.get_task_template(
 
 count_tasks = []
 for level, (count_script, count_parquet) in COUNT_JOBS.items():
-    if PRIORITY_MODE != "all":
+    if args.pilot:
+        print(f"PILOT: not adding the admin{level} count task.")
+    elif PRIORITY_MODE != "all":
         print(f"⚠️ PRIORITY_MODE={PRIORITY_MODE!r}: not adding the admin{level} count task.")
     elif count_parquet.exists():
         print(f"Admin{level} counts already exist at {count_parquet}; not regenerating.")

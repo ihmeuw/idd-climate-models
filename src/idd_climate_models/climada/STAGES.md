@@ -848,7 +848,13 @@ differ only in the RR sample. Launcher scope: the task combinations minus the
 
 ### Launcher
 
-- Resources: `num_cores = 10`, `memory = 4G`. Runtime comes from
+- Resources (changed 2026-10-12): SLURM **3 cores** (`TASK_CORES`) with **10 worker
+  processes** (`--num_cores 10`, `WORKERS`), `memory = 4G`. v2 measured peak memory
+  ≤ 3.2 GB and only ~12% CPU use of 10 cores (the draws mostly wait on zarr reads),
+  so 10 workers on 3 cores keep the reads overlapping with 70% less idle CPU.
+  `--pilot N` submits ~N tasks spread over the basins (profiled runtime ≤ 20 min,
+  no count tasks) to check this before a full run.
+- Runtime comes from
   `stage2_resource_usage.parquet`, read from a **personal** path
   (`/mnt/share/homes/mfiking/downloads/climada_rs/`), binned to
   5/10/20/30/45/60/95-minute ceilings, then **×3** (applied on every
