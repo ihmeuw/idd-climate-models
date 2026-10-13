@@ -71,7 +71,7 @@ def iter_storms_metadata(draw_store: Path) -> list[StormMeta]:
     for storm_path in storm_paths:
         ds = None
         try:
-            ds = xr.open_zarr(storm_path, consolidated=False, chunks={})  # lazy read, no load
+            ds = xr.open_zarr(storm_path, consolidated=False, zarr_format=3, chunks={})  # lazy read, no load
             start_year = pd.to_datetime(ds.attrs["start_date"]).year
             end_year = pd.to_datetime(ds.attrs["end_date"]).year
             storm_id = ds.attrs.get("storm_id", storm_path.name)
@@ -656,7 +656,7 @@ def process_single_draw(draw):
         for storm_path in storm_paths_in_year:
             storm_id = storm_path.name  # fallback identifier if open fails
             try:
-                with xr.open_zarr(storm_path, consolidated=False, chunks="auto") as storm_ds:
+                with xr.open_zarr(storm_path, consolidated=False, zarr_format=3, chunks="auto") as storm_ds:
                     storm_ds = ensure_min_grid(storm_ds)
                     storm_id = storm_ds.attrs.get("storm_id", storm_path.name)
 

@@ -353,7 +353,7 @@ def iter_storms_metadata(draw_store: Path) -> list[StormMeta]:
 
     storms_meta = []
     for storm_path in storm_paths:
-        ds = xr.open_zarr(storm_path, consolidated=False, chunks={})  # lazy read, no load
+        ds = xr.open_zarr(storm_path, consolidated=False, zarr_format=3, chunks={})  # lazy read, no load
         start_year = pd.to_datetime(ds.attrs["start_date"]).year
         end_year = pd.to_datetime(ds.attrs["end_date"]).year
         storm_id = ds.attrs.get("storm_id", storm_path.name)
@@ -439,6 +439,7 @@ def get_exposure_storm_from_draw(
     return xr.open_zarr(
         storm_path,
         consolidated=False,
+        zarr_format=3,  # stage 1 writes format 3; skips probing for .zgroup/.zattrs/.zmetadata
         chunks="auto",   # critical for raster ops
         decode_times=False,
     )
@@ -1147,7 +1148,7 @@ def process_single_draw(args) -> list:
             storm_id = storm_path.name  # fallback for error msg before zarr open
 
             try:
-                storm_ds = xr.open_zarr(storm_path, consolidated=False, chunks="auto")
+                storm_ds = xr.open_zarr(storm_path, consolidated=False, zarr_format=3, chunks="auto")
                 storm_id = storm_ds.attrs.get("storm_id", storm_path.name)
                 print(f"Processing storm id: {storm_id}")
 
