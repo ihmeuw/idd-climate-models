@@ -8,7 +8,7 @@ from pathlib import Path
 # ── Admin level ───────────────────────────────────────────────────────────────
 # Set to 0 or 1. Controls which resource parquet, output root, and
 # --admin_level flag passed to the main and post-processing scripts.
-ADMIN_LEVEL = 0
+ADMIN_LEVEL = 1
 
 # ── Completion check ──────────────────────────────────────────────────────────
 # True  — skip groups that already have a sentinel on disk (normal resume).
@@ -23,7 +23,7 @@ MEMORY_MULTIPLIER = 1
 RUNTIME_MULTIPLIER = 1
 
 CLIMADA_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output")
-SAVE_ROOT = CLIMADA_ROOT / f"stage4b_v3{'_admin1' if ADMIN_LEVEL == 1 else ''}/"
+SAVE_ROOT = CLIMADA_ROOT / f"stage4b_v3_admin{ADMIN_LEVEL}/"
 SENTINEL_DIR = SAVE_ROOT / "_sentinels"
 MAX_GROUP_RUNTIME_MIN = 360
 GROUPED_PARQUET_DIR = (

@@ -61,7 +61,7 @@ ANTIMERIDIAN = LineString([(180, -90), (180, 90)])
 _SHP_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/data/global_shapefile")
 
 if admin_level == 0:
-    SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage3_v3/")
+    SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage3_v3_admin0/")
     GDF_PATH = _SHP_ROOT / "global_WGS84_admin0.parquet"
     SHP_ROOT_NORMALIZED = _SHP_ROOT / "global_WGS84_admin0_normalized.parquet"
 elif admin_level == 1:

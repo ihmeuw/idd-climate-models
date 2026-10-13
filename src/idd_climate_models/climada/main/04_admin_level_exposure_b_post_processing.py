@@ -6,7 +6,7 @@ with all per-(storm × loc) tasks as upstream dependencies.
 
 Path enumeration uses 4A's `compiled_admin_level_metadata.parquet` (which
 already carries the `year` column the 4B launcher loses) instead of
-crawling the stage4b_v3 tree.  At 35M+ expected paths we never
+crawling the stage4b_v3_admin{N} tree.  At 35M+ expected paths we never
 materialize a list of `Path` objects — chunks are sliced directly from
 the metadata DataFrame and each worker constructs path strings on the
 fly while reading.
@@ -39,7 +39,7 @@ COMPILED_4A_PARQUET = (
     / "compiled_admin_level_metadata.parquet"
 )
 
-SAVE_ROOT = CLIMADA_ROOT / "output" / f"stage4b_v3{'_admin1' if ADMIN_LEVEL == 1 else ''}"
+SAVE_ROOT = CLIMADA_ROOT / "output" / f"stage4b_v3_admin{ADMIN_LEVEL}"
 CONSOLIDATED_DIR = SAVE_ROOT / "_consolidated"
 CONSOLIDATED_PARQUET = CONSOLIDATED_DIR / "storm_exposure_all.parquet"
 PARTS_DIR = CONSOLIDATED_DIR / "parts"

@@ -59,7 +59,7 @@ POP_TOTALS_PATH = Path("/mnt/team/rapidresponse/pub/tropical-storms/fhs_populati
 _SHP_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/data/global_shapefile")
 
 if ADMIN_LEVEL == 0:
-    SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage4b_v3/")
+    SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage4b_v3_admin0/")
     GDF_PATH = _SHP_ROOT / "global_WGS84_admin0.parquet"
     SHP_ROOT_NORMALIZED = _SHP_ROOT / "global_WGS84_admin0_normalized.parquet"
 elif ADMIN_LEVEL == 1:

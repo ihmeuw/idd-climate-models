@@ -54,9 +54,9 @@ v3 locations under `/mnt/team/rapidresponse/pub/tropical-storms/climada/output/`
 | Stage 1 zarrs / draw markers | `stage1_v2/`, `stage1_v2_log/` | `stage1_v3/`, `stage1_v3_log/` |
 | Stage 2 GeoTIFFs | `stage2_v2/` | `stage2_v3/` |
 | Stage 3 task metadata | `storm_draw_admin{0,1}_count.parquet` | `storm_draw_admin{0,1}_count_v3.parquet` |
-| Stage 3 parquets | `stage3_v2/`, `stage3_v2_admin1/` | `stage3_v3/`, `stage3_v3_admin1/` |
+| Stage 3 parquets | `stage3_v2/`, `stage3_v2_admin1/` | `stage3_v3_admin0/`, `stage3_v3_admin1/` |
 | 4A metadata, inventory, resource parquet, grouped task lists | `stage4a_metadata_admin{0,1}/` | `stage4a_metadata_v3_admin{0,1}/` |
-| 4B outputs, sentinels, consolidated parquet | `stage4b_v2/`, `stage4b_v2_admin1/` | `stage4b_v3/`, `stage4b_v3_admin1/` |
+| 4B outputs, sentinels, consolidated parquet | `stage4b_v2/`, `stage4b_v2_admin1/` | `stage4b_v3_admin0/`, `stage4b_v3_admin1/` |
 
 The 4A metadata root and the Stage 3 metadata parquets were unversioned in
 v2. They are versioned in v3 because both are resumed from disk: the 4A
@@ -1167,7 +1167,7 @@ output root and resource table, and is passed to the worker as
 
 | | Admin 0 | Admin 1 |
 |---|---|---|
-| Output root | `stage3_v3/` | `stage3_v3_admin1/` |
+| Output root | `stage3_v3_admin0/` | `stage3_v3_admin1/` |
 | Metadata parquet | `storm_draw_admin0_count_v3.parquet` | `storm_draw_admin1_count_v3.parquet` |
 | Shapefile, non-NA basins | `global_WGS84_admin0.parquet` (0–360) | `global_WGS84_admin1_0_360.parquet` (0–360) |
 | Shapefile, NA basin | `global_WGS84_admin0_normalized.parquet` (−180..180) | `global_WGS84_admin1_0_360.parquet`, normalized to −180..180 at load |
@@ -1211,7 +1211,7 @@ year loudly rather than drop the row.
 
 ### Outputs
 
-`SAVE_ROOT` = `stage3_v3/` (admin 0) or `stage3_v3_admin1/` (admin 1), under
+`SAVE_ROOT` = `stage3_v3_admin0/` (admin 0) or `stage3_v3_admin1/` (admin 1), under
 `/mnt/team/rapidresponse/pub/tropical-storms/climada/output/`.
 
 One parquet per year:
@@ -1518,7 +1518,7 @@ Stage 4 has four pieces, run as two Jobmon workflows:
 
 Order: 4A launcher (admin 0 groups → resource assignment → admin 1 groups →
 resource assignment, one workflow) → 4B launcher (4B groups → post-processing).
-The 4B launcher still takes `ADMIN_LEVEL` (currently **0**) and runs once per
+The 4B launcher still takes `ADMIN_LEVEL` (currently **1**) and runs once per
 admin level, after that level's 4A resource assignment has finished.
 
 ### Provenance of the production outputs
@@ -1958,7 +1958,7 @@ Exit code is **1** if any task in the group failed.
 
 #### Outputs
 
-`SAVE_ROOT` = `stage4b_v3/` (admin 0) or `stage4b_v3_admin1/` (admin 1),
+`SAVE_ROOT` = `stage4b_v3_admin0/` (admin 0) or `stage4b_v3_admin1/` (admin 1),
 under `/mnt/team/rapidresponse/pub/tropical-storms/climada/output/`.
 
 ```
@@ -2086,7 +2086,7 @@ Consolidated columns: the 4B columns (with `draw` renamed to
 | Constant | Value | Notes |
 |---|---|---|
 | `COMPILED_4A_PARQUET` | `stage4a_metadata_v3_admin{N}/compiled_admin_level_metadata.parquet` | Path source of truth |
-| `SAVE_ROOT` | `stage4b_v3/` or `stage4b_v3_admin1/` | Same root the worker writes to |
+| `SAVE_ROOT` | `stage4b_v3_admin0/` or `stage4b_v3_admin1/` | Same root the worker writes to |
 | `CHUNK_SIZE` | 5000 | Inventory rows per parallel-read chunk |
 | `BATCH_CHUNKS` | 64 | Chunks per resumable batch (one part file) |
 | `NUM_CORES` | 40 | Parallel reader pool size (matches the task's 40 cores) |
