@@ -77,8 +77,12 @@ def assign_groups(
 
     Returns the same DataFrame (reordered) with a new integer `group_id` column.
     """
+    # Within a resource class, keep each storm's rows (one per location)
+    # together: the worker reads and resamples a storm once for its run of rows.
+    storm_cols = ["source_id", "variant_label", "experiment_id", "batch_year", "basin", "draw", "storm_id"]
     df = meta_df.sort_values(
-        ["memory_gb", "runtime_min_binned"], ascending=[False, False]
+        ["memory_gb", "runtime_min_binned", *storm_cols, "location_id"],
+        ascending=[False, False] + [True] * (len(storm_cols) + 1),
     ).reset_index(drop=True)
 
     # 0-based rank of each task within its memory class.

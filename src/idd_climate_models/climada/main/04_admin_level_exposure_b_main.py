@@ -8,6 +8,7 @@ import pandas as pd  # type: ignore
 import geopandas as gpd  # type: ignore
 from affine import Affine  # type: ignore
 import os
+import functools
 import json
 import warnings
 import argparse
@@ -479,10 +480,15 @@ def get_exposure_storm_from_draw(
 #           Load Shapefile               #
 ##########################################
 
+# The loaders below are cached per process (one 4B group = one process): every
+# (storm, location) row used to read both files again. Callers only filter
+# (which copies) or clip them, never modify them.
+@functools.lru_cache(maxsize=1)
 def load_shapefiles() -> gpd.GeoDataFrame:
     return gpd.read_parquet(GDF_PATH)
 
 
+@functools.lru_cache(maxsize=1)
 def load_shapefiles_normalized() -> gpd.GeoDataFrame:
     """Load NA-basin admin shapes in -180..180 lon convention.
     Admin0: pre-normalized parquet with special regions merged.
@@ -494,6 +500,7 @@ def load_shapefiles_normalized() -> gpd.GeoDataFrame:
 ##########################################
 #           Load Population              #
 ##########################################
+@functools.lru_cache(maxsize=1)
 def load_population_dataframe():
     pop_df = pd.read_parquet(POP_TOTALS_PATH)
 
@@ -996,21 +1003,33 @@ def save_draw_dataframe(
 ###########################################
 #                Main                     #
 ###########################################
-def process_single_storm(
+# Last storm prepared by prepare_storm_rasters; a group's rows are sorted by
+# storm, so the rows of one storm (one per location) reuse it.
+_PREPARED_STORM: dict = {}
+
+
+def prepare_storm_rasters(
     source_id: str,
     variant_label: str,
     experiment_id: str,
     batch_year: str,
     basin: str,
-    draw: int | str,
+    draw: int,
     storm_id: str,
-    location_id: int | str,
-    num_cores: int = 1,
-    ):
+):
+    """One storm's intensity and exposure on its own 0.1° grid, cleaned (0 → NaN,
+    cropped to the affected area).
 
-    draw = int(draw)  # ensure draw is int for path construction
-    location_id = int(location_id)  # ensure location_id is int for shapefile filtering
-    
+    Returns (year, intensity_raster, exposure_raster), or None when either has
+    no affected pixels. The last result is cached, so consecutive rows of the
+    same storm read and resample it once. Callers must not modify the returned
+    rasters (clip, mask and resample_to all return copies).
+    """
+    key = (source_id, variant_label, experiment_id, batch_year, basin, int(draw), int(storm_id))
+    if key in _PREPARED_STORM:
+        return _PREPARED_STORM[key]
+    _PREPARED_STORM.clear()
+
     intensity_draw_store = get_draw_zarr_path(
         source_id=source_id,
         variant_label=variant_label,
@@ -1031,7 +1050,6 @@ def process_single_storm(
         metric="exposure_hours",
     )
 
-    storm_records = []
     storm_path = intensity_draw_store / f"storm_{int(storm_id):04d}"
 
     storm_ds = open_storm(storm_path, chunks="auto")
@@ -1050,22 +1068,6 @@ def process_single_storm(
         # Stage 1 wrote intensity for this storm but not exposure.
         storm_ds.close()
         raise RuntimeError(f"exposure missing in Stage 1 for storm {storm_id}") from e
-
-    # Load large reference data only after confirming this storm needs processing
-    if basin == "NA":
-        shapefile = load_shapefiles_normalized()
-    else:
-        shapefile = load_shapefiles()
-    pop_df = load_population_dataframe()
-
-    try:
-        shapefile = shapefile[shapefile["loc_id"] == location_id].copy()
-    except KeyError:
-        print(f"Location ID {location_id} not found in shapefile → skipping storm")
-        storm_ds.close()
-        storm_exposure.close()
-        del storm_ds, storm_exposure
-        return
 
     # Normalize longitudes if basin is NA
     if basin == "NA":
@@ -1112,16 +1114,58 @@ def process_single_storm(
     del storm_exposure
     del storm_ds
 
-    try: 
+    result = None
+    try:
         intensity_raster = clean_raster(intensity_raster)
     except ValueError:
         print("No affected pixels found in intensity raster → skipping storm")
+    else:
+        try:
+            exposure_raster = clean_raster(exposure_raster)
+        except ValueError:
+            print("No affected pixels found in exposure raster → skipping storm")
+        else:
+            result = (year, intensity_raster, exposure_raster)
+
+    _PREPARED_STORM[key] = result
+    return result
+
+
+def process_single_storm(
+    source_id: str,
+    variant_label: str,
+    experiment_id: str,
+    batch_year: str,
+    basin: str,
+    draw: int | str,
+    storm_id: str,
+    location_id: int | str,
+    num_cores: int = 1,
+    ):
+
+    draw = int(draw)  # ensure draw is int for path construction
+    location_id = int(location_id)  # ensure location_id is int for shapefile filtering
+
+    prepared = prepare_storm_rasters(
+        source_id, variant_label, experiment_id, batch_year, basin, draw, storm_id
+    )
+    if prepared is None:
         return
+    year, intensity_raster, exposure_raster = prepared
+
+    storm_records = []
+
+    # Reference data (cached per process)
+    if basin == "NA":
+        shapefile = load_shapefiles_normalized()
+    else:
+        shapefile = load_shapefiles()
+    pop_df = load_population_dataframe()
+
     try:
-        exposure_raster = clean_raster(exposure_raster)
-    except ValueError:
-        print("No affected pixels found in exposure raster → skipping storm")
-        del intensity_raster, exposure_raster
+        shapefile = shapefile[shapefile["loc_id"] == location_id].copy()
+    except KeyError:
+        print(f"Location ID {location_id} not found in shapefile → skipping storm")
         return
 
     # ---------------------------------------------------
@@ -1353,6 +1397,13 @@ def main(grouped_tasks_parquet: str, group_id: int) -> None:
     if group_df.empty:
         print(f"⚠️ No tasks found for group_id={group_id} in {grouped_tasks_parquet}")
         return
+
+    # Keep each storm's rows (one per location) together so prepare_storm_rasters
+    # reads and resamples the storm once.
+    group_df = group_df.sort_values(
+        ["source_id", "variant_label", "experiment_id", "batch_year", "basin", "draw", "storm_id", "location_id"],
+        kind="stable",
+    ).reset_index(drop=True)
 
     total = len(group_df)
     group_hash = group_df["group_hash"].iloc[0]
