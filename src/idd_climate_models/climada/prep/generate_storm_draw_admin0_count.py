@@ -10,6 +10,14 @@ For each (storm_draw, source_id, variant_label, experiment_id, batch_year, basin
 Output: /mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin0_count_v3.parquet
 """
 
+import os
+import sys
+
+# Point GDAL/PROJ at this env's data folders before rasterio is used; unset,
+# rasterio searches for them on every raster open (see main/gdal_env.py).
+os.environ.setdefault("GDAL_DATA", os.path.join(sys.prefix, "share", "gdal"))
+os.environ.setdefault("PROJ_DATA", os.path.join(sys.prefix, "share", "proj"))
+
 from pathlib import Path
 from typing import Any
 

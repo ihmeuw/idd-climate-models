@@ -16,6 +16,14 @@ polygon produce a count of 0 but are still included in the output.
 Output: /mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin1_count_v3.parquet
 """
 
+import os
+import sys
+
+# Point GDAL/PROJ at this env's data folders before rasterio is used; unset,
+# rasterio searches for them on every raster open (see main/gdal_env.py).
+os.environ.setdefault("GDAL_DATA", os.path.join(sys.prefix, "share", "gdal"))
+os.environ.setdefault("PROJ_DATA", os.path.join(sys.prefix, "share", "proj"))
+
 from pathlib import Path
 from typing import Any
 
