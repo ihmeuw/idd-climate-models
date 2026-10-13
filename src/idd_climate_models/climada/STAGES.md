@@ -824,68 +824,65 @@ Verified 2026-10-08 on a sample: 0 missing or undersized GeoTIFFs across
 
 ### Runtime scope
 
-One invocation processes a single tuple of
-`(storm_draw, source_id, variant_label, experiment_id, batch_year, basin,
-relative_risk, sample_name)`. Inside that invocation:
-
-- 100 inner CLIMADA draws (range `0..99`) are processed by
-  `process_single_draw` in **batches of `num_cores`** via
-  `rra_tools.parallel.run_parallel`.
-- All storms in a draw × all years in `batch_year` are accumulated into a
-  per-year `cumulative_paf[year]` and divided by 100 at the end.
-- One GeoTIFF is written per year in `batch_year`.
+One task per **combo** `(source_id, variant_label, experiment_id, batch_year,
+basin)` (changed 2026-10-13; before, one task per `(storm draw, cause)`).
 
 `storm_draw_table.csv` has 100 storm draws. Each maps to one
-`(source_id, variant_label)` (1–29 storm draws per pair) and names one RR
-sample column per cause (`indirect_cvd_draw`, `indirect_resp_draw`). All storm
-draws of the same (source, variant) read the **same** Stage 1 zarrs; they
-differ only in the RR sample. Launcher scope: the task combinations minus the
-1965–1969 baseline, × storm draws, × 2 causes = **90,874 tasks**,
-**424,200 GeoTIFFs**.
+`(source_id, variant_label)` (CMCC-ESM2 and EC-Earth3 29, MPI-ESM1-2-HR 26,
+MRI-ESM2-0 variants 1–6) and names one RR sample column per cause
+(`indirect_cvd_draw`, `indirect_resp_draw`). All storm draws of a combo read
+the **same** Stage 1 zarrs and differ only in the RR sample, so a combo task
+has 2–58 **jobs** (storm draw × cause) and reads each Stage 1 storm once for
+all of them. Launcher scope: 3,612 combos (task combinations minus the
+1965–1969 baseline) = 90,874 jobs = **424,200 GeoTIFFs**.
+
+Inside a task:
+
+- `build_jobs` lists the combo's jobs and, per job, the years whose GeoTIFF
+  is missing or invalid (`get_year_status`). Jobs with nothing missing are
+  dropped.
+- The 100 Stage 1 draws (`N_DRAWS`, range `0..99`) are processed by
+  `process_single_draw`, each storm read once and applied to every job's RR
+  sample. Per-job yearly sums are added in draw order and divided by 100.
+- One GeoTIFF is written per (job, missing year).
 
 ### Launcher
 
-- Resources (changed 2026-10-12): SLURM **3 cores** (`TASK_CORES`) with **10 worker
-  processes** (`--num_cores 10`, `WORKERS`), `memory = 4G`. v2 measured peak memory
-  ≤ 3.2 GB and only ~12% CPU use of 10 cores (the draws mostly wait on zarr reads),
-  so 10 workers on 3 cores keep the reads overlapping with 70% less idle CPU.
-  `--pilot N` submits ~N tasks spread over the basins (profiled runtime ≤ 20 min,
-  no count tasks) to check this before a full run.
-- Runtime comes from
-  `stage2_resource_usage.parquet`, read from a **personal** path
-  (`/mnt/share/homes/mfiking/downloads/climada_rs/`), binned to
-  5/10/20/30/45/60/95-minute ceilings, then **×3** (applied on every
-  launch, not only reruns).
-- Combinations missing from the resource parquet get `fillna(30)`. The value is
-  in **seconds** (the comment says 60 minutes), so they land in the 5-minute
-  bucket (15 min after ×3).
-- `PRIORITY_MODE = "all"`: every storm draw, with `PRIORITY_DRAWS` first.
+- One task per combo with any missing GeoTIFF (`combo_is_complete` stops at
+  the first missing file). `--dry_run` builds and prints the task list without
+  binding.
+- Resources (2026-10-13): `--cores 1` (one worker: with more, each draw's
+  per-job sums — up to ~360 MiB for a 58-job EP combo — are pickled back to
+  the parent, which was far slower), `--memory_gb 4`, `--runtime_min 60`,
+  ×1.5 on retry, `--max_concurrent 300`. Measured locally on the largest combo
+  size (EC-Earth3 ssp585 2020–2024 EP, 58 jobs): 16 min, 96% of 1 core, peak
+  2.6 GB. A small one (MRI-ESM2-0 r4 historical 1970–1974 SP, 6 jobs): 103 s,
+  0.3 GB. `--pilot N` submits ~N combos spread over basins (no count tasks).
+- `PRIORITY_MODE = "all"`: every storm draw (the priority list no longer
+  orders tasks, since a task covers all storm draws of a combo).
 - **Downstream Stage 3 count tasks** (`CLIMADA_stage2_admin{0,1}_counts`):
   one task per admin level runs `prep/generate_storm_draw_admin{N}_count.py`
   after every Stage 2 task in the workflow succeeds (immediately if none were
   submitted). 64 cores, 64 G, 120 min, `max_attempts = 2`, retry scaling
   memory and runtime ×1.5. Added only when that level's
   `storm_draw_admin{N}_count_v3.parquet` is missing (delete it to regenerate)
-  and only for `PRIORITY_MODE = "all"`, because the generators read 8
-  representative storm draws that are not all priority draws.
+  and only for `PRIORITY_MODE = "all"`.
 
 ### CLI
 
 ```
 python 02_relative_risk_main.py \
-  --storm_draw <storm_draw_NNNN>      # selects output path; RR sample comes from --sample_name
   --source_id <str> \
   --variant_label <str> \
   --experiment_id <str> \
   --batch_year <YYYY-YYYY> \
   --basin <EP|NA|NI|SI|AU|SP|WP> \
-  --relative_risk <indirect_resp_draw|indirect_cvd_draw> \
-  --sample_name <str>                 # column name in the RR table
-  --num_cores <int>
+  --num_cores <int>                   # parallel Stage 1 draws; the launcher uses 1
 ```
 
-Exit code is **1** if any storm failed in any inner draw (see Resume
-semantics), 0 otherwise.
+The module can be imported (argument parsing is under `__main__`); tests call
+`main(..., save_root=<scratch>)`. Exit code is **1** if any storm failed in any
+draw (see Resume semantics), 0 otherwise.
 
 ### Inputs
 
@@ -896,8 +893,8 @@ semantics), 0 otherwise.
 | `/mnt/team/rapidresponse/pub/tropical-storms/data/relative_risk_samples/cvd_rr_samples.csv` | Cardiovascular-disease RR curve (`relative_risk=indirect_cvd_draw`) |
 
 Both RR CSVs have 21 rows and columns `windspeed`, `type`, `mean`, `min`,
-`max`, `sample_001` … `sample_100`; one sample column is selected via
-`--sample_name`. They are byte-identical to the copies in the repo's `data/`
+`max`, `sample_001` … `sample_100`; each job uses the sample column
+that `storm_draw_table.csv` names for its storm draw and cause. They are byte-identical to the copies in the repo's `data/`
 folder used by the March production run.
 
 **Wind-speed units (left as-is by decision, 2026-10-08).** The `windspeed`
@@ -958,157 +955,96 @@ sampled production outputs.)
 
 ### Pipeline flow
 
-Per-invocation (`main`):
+Per task (`main`):
 
-1. **Resume check (whole draw)** — `check_if_draw_complete` returns True
-   iff every year's GeoTIFF exists, is ≥ 1 KB, and loads as a valid raster.
-   If True, return.
-2. **Per-year resume** — `get_year_status` partitions years into
-   `valid_years` (file passes the same checks) and `invalid_years`. Only
-   `invalid_years` are recomputed. Invalid files are unlinked.
-3. Build the basin template raster once (`generate_basin_template_raster`).
-4. Load the RR sample CSV once.
-5. Initialize `cumulative_paf = {year: zeros(template_shape)}` for each
-   invalid year.
-6. Iterate inner draws `0..99` in batches of `num_cores`, calling
-   `process_single_draw` via `run_parallel`. Each worker returns
-   `(yearly_paf, failures)`. Sum `yearly_paf[year]` into `cumulative_paf[year]`
-   and collect the `(draw, year, storm_id)` of every failure.
-7. Divide by `n_draws = 100` to get the draw-mean.
-8. Save one GeoTIFF per invalid year **that has no failed storm**; collect
-   the saved paths.
-9. Single chmod sweep over `(file, file.parent)` for every saved path.
-10. If any storm failed, print the failures and exit 1.
+1. `build_jobs`: the combo's (storm draw × cause) jobs, each with the years
+   still missing (`get_year_status` unlinks undersized or unreadable files).
+   No jobs → return.
+2. Build the basin template raster and load the RR CSVs once.
+3. For draws `0..99` (batches of `num_cores` via `run_parallel`; 1 in
+   production) call `process_single_draw`, which returns cropped per-(job,
+   year) sums and failures. Add each sum into `cumulative_paf[(job, year)]`
+   in draw order (adding the crop equals adding the full array, since
+   x + 0.0 = x).
+4. Divide by `N_DRAWS = 100`; save one GeoTIFF per (job, missing year) whose
+   year had no failed storm; chmod the saved files and parents.
+5. If any storm failed, print the failures and exit 1.
 
-Per inner draw, per worker (`process_single_draw`):
+Per draw (`process_single_draw`):
 
-1. Build the per-draw `RRInterpolator` from the shipped `rr_samples_df` +
-   `sample_name` (`build_rr_interpolator`). Reused for every storm.
-2. Locate the stage 1 intensity zarr (`get_draw_zarr_path`). If missing or
-   empty → return zero rasters for all invalid years (no failures).
-3. Read all storm metadata once (`iter_storms_metadata`) to map storms to
-   the years they affect (`map_storms_to_years`). A storm is assigned to every
-   year from its `start_date` year to its `end_date` year.
-4. For each year:
-   a. If the year has no storms → fill with zeros and continue.
-   b. For each storm in that year (try/except per storm; on failure log
-      traceback, record `(year, storm_id)` and `continue`):
-      - Open the storm zarr in a `with` block (handle released on any exit).
-      - `ensure_min_grid` to guarantee ≥ 3×3 pixels for rasterization.
-      - For NA basin: `normalize_dataset` (0-360 → −180..180; idempotent, so
-        the mixed production NA conventions are handled).
-      - Compute RR via `generate_relative_risk` + the pre-built interpolator.
-      - Mask non-positive RR to NaN (`where(rr_da > 0)`).
-      - Convert to `rt.RasterArray` with `to_raster(..., expected_res=template
-        res)`, which raises unless the coords step is exactly 0.1° in both
-        axes. Pre-fix Stage 1 rasters are evenly spaced at the **wrong** step
-        (e.g. 0.115°), so they fail here instead of being smeared across the
-        template.
-      - Resample (nearest) to the basin template.
-      - Mask `= rr_values > 0` (NumPy `>` excludes NaN). If any: accumulate
-        `(rr − 1)/rr × IMPACT_DAYS_FRACTION` into `sum_raw_paf`.
+1. Locate the Stage 1 intensity store (`get_draw_zarr_path`); missing or
+   empty → no contribution.
+2. Build each job's `RRInterpolator` once (`build_rr_interpolator`).
+3. Storm dates from each storm group's `zarr.json` (`iter_storms_metadata`);
+   map storms to years (`map_storms_to_years`).
+4. For each year, for each storm in it (try/except per storm; on failure log
+   and record `(year, storm_id)`):
+   - Load the storm once with `open_storm` (`storm_zarr.py`) and keep it until
+     its last year. `ensure_min_grid`; NA basin `normalize_dataset`.
+   - `add_storm_paf`: `to_raster(..., expected_res=0.1)` (raises on pre-fix
+     stretched grids), resample the **intensity** to the basin template
+     (nearest) once, then for each job needing the year apply its RR curve
+     (`rr_from_windspeed`) in the storm's window and add
+     `(rr − 1)/rr × IMPACT_DAYS_FRACTION` where `rr > 0`.
+
+Resampling intensity once and applying RR on the template equals resampling
+each job's RR raster (RR is per pixel, the resample is nearest): bit-identical
+on 267 storms × 6–12 RR samples (NA, EP, SP).
+
+### Filesystem reads (2026-10-13)
+
+Stage 2 was stopped on 2026-10-13 after storage flagged ~4.2M NOENT lookups.
+Changes, measured with strace on real tasks (SP MRI-ESM2-0 r4 historical
+1970–1974):
+
+| | `stage1_v3` lookups | misses | GDAL/PROJ data lookups |
+|---|---|---|---|
+| Old per-job task (`storm_draw_0100`, resp) | 35,471 | 12,558 | 14,209 (~9,300 misses) |
+| + `zarr_format=3` and dates from `zarr.json` | 21,296 | 6,888 | 14,209 |
+| + `open_storm` chunk listing | 18,447 | 0 | 14,209 |
+| + `gdal_env` (`GDAL_DATA`/`PROJ_DATA`) | 18,447 | 0 | 0 |
+| Combo task, all 6 jobs | 18,447 | 0 | 0 |
+
+- `zarr_format=3`: zarr otherwise probes `.zgroup`/`.zattrs`/`.zmetadata`.
+- `open_storm`: Stage 1 never writes all-NaN 64×64 chunks; plain reads looked
+  up every chunk position. The store lists each array's `c/` once instead
+  (adds ~4,400 directory listings per task, no misses).
+- `gdal_env`: without the variables rasterio searched the conda env (on
+  `/mnt/share/code`) for its data folders on every resample.
+- Combo tasks: each storm is read once instead of once per job (~25× on
+  average, 58× for the largest combos).
+
+Outputs are bit-identical to the production GeoTIFFs: 60/60 compared (10 SP,
+50 EP).
 
 ### Resume semantics
 
-The completion sentinel is **per-year GeoTIFF existence + validity**:
+Per (job, year) GeoTIFF existence + validity:
 
-- **Missing** → year not yet computed (or not saved because a storm failed);
-  included in `invalid_years`.
-- **Size < 1 KB** → corrupt; file is unlinked, year goes to `invalid_years`.
-- **Fails `rt.load_raster`** → unreadable; file is unlinked, year goes to
-  `invalid_years`.
-- **All years valid** → script returns immediately at the top of `main` via
-  `check_if_draw_complete`.
+- **Missing** → computed by the next task on that combo.
+- **Size < 1 KB** or **fails `rt.load_raster`** → unlinked and recomputed.
+- **All years of all jobs valid** → `main` returns at once; the launcher does
+  not submit the combo.
 
-A year in which any storm failed (in any of the 100 inner draws) is **not
-saved**, so it stays invalid. The task exits 1, Jobmon retries it, and the
-retry recomputes only the unsaved years. Years without failures are saved on
-the first attempt.
-
-If a single year is invalid, it is recomputed by re-running all 100 inner
-draws *for that year*. There is no per-(inner draw) sentinel — the inner-draw
-accumulator runs in memory and is only persisted as a mean.
-
-#### Launcher-level resume (task granularity)
-
-The launcher (`02_relative_risk_launcher.py`) submits one Jobmon task per
-8-tuple `(storm_draw, source_id, variant_label, experiment_id, batch_year,
-basin, relative_risk, sample_name)`. It derives completion by **scanning the
-filesystem under `SAVE_ROOT`** rather than querying Jobmon.
-
-Per-row check (`task_is_complete`):
-1. For each `year` in `batch_year`, build the expected raw_paf GeoTIFF path
-   via `_stage2_paf_path` — must match the format `save_raster` writes.
-2. Treat the task as complete iff every year's TIF exists *and* is ≥ 1 KB.
-3. Skip the load-validity step at launcher level — the main script's
-   `_is_valid_raster` will catch and rebuild corrupt files once the task
-   actually runs.
-
-If any year is missing or undersized for an 8-tuple, the launcher submits a
-task for it. Inside that task, `get_year_status` decides per-year which to
-recompute, so submitting a partially-done task is cheap (the main script
-short-circuits already-valid years).
-
-Submission gating (`PRIORITY_MODE` constant in `02_relative_risk_launcher.py`):
-- `"non_priority"` — submit everything except the hardcoded `PRIORITY_DRAWS`
-  list of 8 storm_draws.
-- `"priority"` — submit only `PRIORITY_DRAWS` (smoke runs).
-- `"all"` (current value) — submit every storm_draw, priority ones first.
-
-Note: the code comment block labels `"non_priority"` as the default, but the
-runtime constant is currently set to `"all"`. Treat the comment as
-historical and the constant as authoritative.
-
-### Performance characteristics
-
-- **`interp1d` built once per worker (per inner draw)** in
-  `build_rr_interpolator`, not once per storm. The `RRInterpolator`
-  (`NamedTuple`) carries the precomputed callable, windspeed bounds, and
-  upper-cap RR value for all storms in the draw.
-- **No per-storm `days_impact` raster.** The mask
-  `np.isfinite(t_impact) & np.isfinite(rr_values) & (t_impact > 0) & (rr_values != 0)`
-  collapses to `rr_values > 0` and the value is constant
-  (`IMPACT_DAYS_FRACTION`), so one full raster construction + resample per
-  storm is eliminated.
-- **`interpolate_rr_from_windspeed` constructs a fresh DataArray** rather
-  than `.copy()` + `.values =` overwrite — no wasted allocation of the
-  source intensity values.
-- **Per-storm try/except** + `with xr.open_zarr(...) as storm_ds:` so one
-  bad storm logs traceback and the loop continues; file handles always
-  released.
-- **Tight chmod** — after `save_raster` returns the saved path, a single
-  loop applies `os.chmod(path, 0o664)` + `os.chmod(path.parent, 0o775)`.
-  No `os.walk` tree traversal.
+A year in which any storm failed (in any draw) is saved for **no** job, so
+it stays missing; the task exits 1 and Jobmon retries it. Tested: deleting 3
+of a combo's 30 GeoTIFFs and re-running recomputed only those (3 jobs, years
+1970/1971/1973), left the other 27 untouched, and reproduced them exactly.
 
 ### Failure modes worth knowing
 
 - **Stretched (pre-fix) Stage 1 inputs** — every affected storm raises in
-  `to_raster`, its years are not saved, and the task exits 1. Re-running
-  Stage 2 against the current production `stage1_v2` fails by design; re-run
-  Stage 1 first.
+  `to_raster`, its years are not saved, and the task exits 1.
 - **Storm-level failure** — logged with traceback; the affected year is not
-  saved, the task exits 1, and Jobmon retries. A deterministic failure
-  exhausts the retries and shows as a failed task.
+  saved for any job, the task exits 1, and Jobmon retries.
 - **Unreadable storm metadata** — `iter_storms_metadata` has no try/except,
-  so a bad storm group raises out of the worker and fails the whole task.
-- **Stage 1 zarr missing or empty** — `process_single_draw` returns zero
-  rasters for that inner draw rather than failing (a draw with no landfalling
-  storms has no store). This cannot distinguish "no landfall" from "missing
-  Stage 1 output", so Stage 1 must be complete (all draw markers) first. The
-  launcher enforces this: before submitting, it exits non-zero unless all 100
-  Stage 1 draws of every combination it is about to submit have a marker
-  (`require_stage1_complete` in `stage1_run_config.py`).
+  so a bad storm group fails the task.
+- **Stage 1 zarr missing or empty** — no contribution for that draw (a draw
+  with no landfalling storms has no store). The launcher refuses to submit
+  unless every Stage 1 draw of every submitted combo has a marker
+  (`require_stage1_complete`).
 - **Storms spanning two calendar years** contribute their full 20-day PAF to
-  both years. None were found in the sampled data (every exposure array is
-  single-year).
-- **`storm_draw` is path-only** — currently the CLI `storm_draw` arg
-  appears only in output paths, not in which stage 1 zarrs are read. If
-  upstream needs per-`storm_draw` input selection, that wiring is not
-  present today.
-- **Single `sample_name` per invocation** — to produce per-draw uncertainty
-  outputs (`sample_001`, …, `sample_100`), run the script 100 times with
-  different `--sample_name` values. The 100× workflow is launcher-level,
-  not main-script-level.
+  both years.
 
 ---
 

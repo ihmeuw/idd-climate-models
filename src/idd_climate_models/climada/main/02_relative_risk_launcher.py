@@ -3,24 +3,33 @@ import uuid
 import pandas as pd  # type: ignore
 from jobmon.client.tool import Tool  # type: ignore
 from pathlib import Path
-import numpy as np
 
 from stage1_run_config import require_stage1_complete
 
-parser = argparse.ArgumentParser(description="Launch CLIMADA stage 2")
+parser = argparse.ArgumentParser(description="Launch CLIMADA stage 2 (one task per combo)")
 parser.add_argument("--pilot", type=int, default=0,
-                    help="submit only ~N tasks (spread over basins, profiled runtime <= "
-                         "PILOT_MAX_RUNTIME_MIN) to check resources; no count tasks")
+                    help="submit only ~N combos, spread over basins and models, to check "
+                         "resources; no count tasks")
+# One core and one worker per task: with more workers each draw's per-job
+# sums (up to ~360 MiB for a 58-job EP combo) are pickled back to the parent,
+# which was far slower than running the draws in one process.
+parser.add_argument("--cores", type=int, default=1, help="SLURM cores per task")
+parser.add_argument("--workers", type=int, default=None,
+                    help="parallel stage 1 draws per task (default: --cores)")
+parser.add_argument("--memory_gb", type=int, default=4, help="memory per task (x1.5 on retry)")
+parser.add_argument("--runtime_min", type=int, default=60, help="runtime per task (x1.5 on retry)")
+parser.add_argument("--max_concurrent", type=int, default=300,
+                    help="max tasks running at once (caps the load on the shared filesystem)")
+parser.add_argument("--dry_run", action="store_true",
+                    help="build the task list and print it; do not bind or submit anything")
 args = parser.parse_args()
+WORKERS = args.workers or args.cores
 
-# Resources. v2 measured (March 2026): peak memory <= 3.2 GB; the 10 parallel
-# draws keep only ~1.2 cores busy on average (CPU time / (elapsed x 10 cores)
-# = 0.12) because they mostly wait on zarr reads. So request 3 cores but keep
-# 10 worker processes (--num_cores 10): the reads still overlap and 70% less
-# CPU sits idle.
-TASK_CORES = 3
-WORKERS = 10
-PILOT_MAX_RUNTIME_MIN = 20
+# One task per combo (source_id, variant_label, experiment_id, batch_year,
+# basin): it reads each stage 1 storm once and writes the rasters of every
+# storm draw x cause of that combo. Before 2026-10-13 there was one task per
+# (storm draw, cause), each re-reading all 100 stage 1 draws of its combo
+# (~25 reads of every storm), which flooded the filesystem with lookups.
 
 RELATIVE_RISKS = ["indirect_resp_draw", "indirect_cvd_draw"]
 
@@ -54,26 +63,27 @@ def _stage2_paf_path(
     )
 
 
-def task_is_complete(row) -> bool:
-    """A stage-2 task is complete iff every year in its batch_year has a
-    raw_paf GeoTIFF on disk that's at least 1 KB. Mirrors the existence +
-    size check in `check_if_draw_complete`; skips the load-validity check
-    (the main script's resume logic will catch and rebuild corrupt files)."""
-    start_year, end_year = map(int, row["batch_year"].split("-"))
-    for year in range(start_year, end_year + 1):
-        path = _stage2_paf_path(
-            storm_draw=row["storm_draw"],
-            source_id=row["source_id"],
-            variant_label=row["variant_label"],
-            experiment_id=row["experiment_id"],
-            batch_year=row["batch_year"],
-            basin=row["basin"],
-            relative_risk=row["relative_risk"],
-            sample_name=row["sample_name"],
-            year=year,
-        )
-        if not path.exists() or path.stat().st_size < 1024:
-            return False
+def combo_is_complete(rows: pd.DataFrame) -> bool:
+    """A combo is complete iff every (storm draw, cause) row has a raw_paf
+    GeoTIFF of at least 1 KB for every year in batch_year. Stops at the first
+    missing file. Skips the load-validity check (the main script's per-job
+    resume logic catches and rebuilds corrupt files)."""
+    for row in rows.itertuples(index=False):
+        start_year, end_year = map(int, row.batch_year.split("-"))
+        for year in range(start_year, end_year + 1):
+            path = _stage2_paf_path(
+                storm_draw=row.storm_draw,
+                source_id=row.source_id,
+                variant_label=row.variant_label,
+                experiment_id=row.experiment_id,
+                batch_year=row.batch_year,
+                basin=row.basin,
+                relative_risk=row.relative_risk,
+                sample_name=row.sample_name,
+                year=year,
+            )
+            if not path.exists() or path.stat().st_size < 1024:
+                return False
     return True
 
 # Read in paths
@@ -149,117 +159,47 @@ else:
     )
 
 #########################################################################################
-# assign runtime
-resource_df = pd.read_parquet("/mnt/share/homes/mfiking/downloads/climada_rs/stage2_resource_usage.parquet")
-resource_df = resource_df.drop(columns=["task_id", "runtime", "memory", "memory_gb", "memory_rounded"])
-resource_df = resource_df.rename(columns={
-    "runtime_rounded": "max_run_time",
-})
-
-# assign 4GB
-resource_df["memory_req"] = "4G"
-# worker processes per task (SLURM cores: TASK_CORES)
-resource_df["num_cores"] = WORKERS
-resource_df = resource_df.drop_duplicates(subset=["source_id", "variant_label", "experiment_id", "batch_year", "basin"])
-
-# merge with main df
-final_df = df.merge(
-    resource_df,
-    on=["source_id", "variant_label", "experiment_id", "batch_year", "basin"],
-    how="left"
-)
-# fill any na maxrun_time with 60 minutes, memory_req with 4G, num_cores with 10
-final_df["max_run_time"] = final_df["max_run_time"].fillna(30)
-final_df["memory_req"] = final_df["memory_req"].fillna("4G")
-final_df["num_cores"] = final_df["num_cores"].fillna(WORKERS)
-
-
-# Vectorized runtime bucketing (seconds): right-edge bins map to a small set
-# of SLURM-friendly walltime ceilings. Values above 3600s fall into the 5700s
-# bucket.
-_RUNTIME_BIN_EDGES = [-float("inf"), 300, 600, 1200, 1800, 2700, 3600, float("inf")]
-_RUNTIME_BIN_VALUES = [300, 600, 1200, 1800, 2700, 3600, 5700]
-
-_bin_idx = pd.cut(
-    final_df["max_run_time"],
-    bins=_RUNTIME_BIN_EDGES,
-    labels=False,
-    include_lowest=True,
-)
-final_df["max_run_time"] = (
-    pd.Series(_RUNTIME_BIN_VALUES)[_bin_idx].to_numpy()
-)
-# Convert from seconds to whole minutes (SLURM walltime granularity).
-final_df["max_run_time"] = np.ceil(final_df["max_run_time"] / 60).astype(int)
-
-
-#########################################################################################
-# Fan out (indirect_resp_draw, indirect_cvd_draw) into separate rows.
+# Fan out (indirect_resp_draw, indirect_cvd_draw): one row per (storm draw, cause).
 rr_cols = ["indirect_cvd_draw", "indirect_resp_draw"]
+COMBO_COLS = ["source_id", "variant_label", "experiment_id", "batch_year", "basin"]
 
-final_long = final_df.melt(
-    id_vars=[
-        "source_id",
-        "variant_label",
-        "experiment_id",
-        "batch_year",
-        "basin",
-        "storm_draw",
-        "max_run_time",
-        "runtime_min",
-        "memory_req",
-        "num_cores",
-    ],
+final_long = df.melt(
+    id_vars=COMBO_COLS + ["storm_draw"],
     value_vars=rr_cols,
     var_name="relative_risk",
     value_name="sample_name",
 )
 
 ############################################################################################
-# Completion derivation (filesystem-based, not Jobmon-based).
-#
-# A stage-2 task writes one raw_paf GeoTIFF per year in batch_year. A task is
-# complete iff every year's TIF exists and is at least 1 KB. We mirror that
-# check here per row of final_long and submit only rows whose 8-tuple isn't
-# already fully written. The main script's check_if_draw_complete /
-# get_year_status will handle the per-year recompute granularity inside any
-# task we do submit.
-completed_mask = final_long.apply(task_is_complete, axis=1)
-remaining_long = final_long[~completed_mask].copy()
-print(
-    f"Completion scan: {completed_mask.sum()} / {len(final_long)} tasks "
-    f"already done on disk; {len(remaining_long)} tasks to submit."
-)
+# Completion derivation (filesystem-based, not Jobmon-based): submit a combo
+# if any of its (storm draw, cause, year) rasters is missing. The worker only
+# computes the missing ones (get_year_status per job).
+combos = final_long.groupby(COMBO_COLS, sort=False)
+incomplete = [key for key, rows in combos if not combo_is_complete(rows)]
+remaining = pd.DataFrame(incomplete, columns=COMBO_COLS)
+print(f"Completion scan: {combos.ngroups - len(remaining)} / {combos.ngroups} combos "
+      f"already done on disk; {len(remaining)} combos to submit.")
 
 if args.pilot:
-    # A quick resource check: about N tasks spread over the basins, all with a
-    # short profiled runtime, including each basin's longest such combo.
-    short = remaining_long[remaining_long["runtime_min"] <= PILOT_MAX_RUNTIME_MIN]
-    per_basin = max(1, -(-args.pilot // short["basin"].nunique()))
-    remaining_long = (
-        short.sort_values("runtime_min", ascending=False)
-        .groupby("basin", group_keys=False)
-        .apply(lambda g: pd.concat([g.head(1), g.iloc[1:].sample(min(len(g) - 1, per_basin - 1), random_state=0)]))
+    # A resource check: about N combos spread over basins and models (the
+    # models differ in storm draws per combo: 1-29).
+    per_basin = max(1, -(-args.pilot // remaining["basin"].nunique()))
+    remaining = (
+        remaining.groupby("basin", group_keys=False)
+        .apply(lambda g: g.sample(min(len(g), per_basin), random_state=0))
+        .reset_index(drop=True)
     )
-    print(f"PILOT: {len(remaining_long)} tasks, profiled runtime <= {PILOT_MAX_RUNTIME_MIN} min "
-          f"(by basin: {remaining_long['basin'].value_counts().to_dict()})")
+    print(f"PILOT: {len(remaining)} combos (by basin: {remaining['basin'].value_counts().to_dict()}; "
+          f"by model: {remaining['source_id'].value_counts().to_dict()})")
 
-# Each task reads all 100 stage 1 draws of its combo (`draws = list(range(100))`
-# in the main), and a missing stage 1 store reads as "no storms", so refuse to
-# submit until stage 1 has finished every one of them.
-stage1_combos = remaining_long[
-    ["source_id", "variant_label", "experiment_id", "batch_year", "basin"]
-].drop_duplicates()
+# Each task reads all 100 stage 1 draws of its combo (N_DRAWS in the main),
+# and a missing stage 1 store reads as "no storms", so refuse to submit until
+# stage 1 has finished every one of them.
 require_stage1_complete({
     (*combo, draw)
-    for combo in stage1_combos.itertuples(index=False, name=None)
+    for combo in remaining[COMBO_COLS].itertuples(index=False, name=None)
     for draw in range(100)
 })
-
-# Reruns: triple the budgeted runtime relative to the resource_usage parquet.
-# (Empirical: invalidated single-year recomputes inside main() still re-run
-# all 100 inner draws, so we want headroom over the first-time-success budget.)
-remaining_long["max_run_time"] = remaining_long["max_run_time"] * 3
 
 
 ############################################################################################
@@ -273,15 +213,11 @@ MAIN_SCRIPT = Path(__file__).resolve().parent / "02_relative_risk_main.py"
 
 tool = Tool(name="CLIMADA_stage2")
 
-
-# Create a workflow, and set the executor
 workflow = tool.create_workflow(
-    name=f"CLIMADA_stage2_{'pilot_' if args.pilot else ''}{wf_uuid}",
-    # max_concurrently_running = 100,
+    name=f"CLIMADA_stage2_combo_{'pilot_' if args.pilot else ''}{wf_uuid}",
+    max_concurrently_running=args.max_concurrent,
 )
 
-
-# Set resources on the workflow
 workflow.set_default_compute_resources_from_dict(
     cluster_name="slurm",
     dictionary={
@@ -294,79 +230,52 @@ workflow.set_default_compute_resources_from_dict(
     }
 )
 
+task_template = tool.get_task_template(
+    template_name=f"CLIMADA_stage2_combo_{args.runtime_min}m_{WORKERS}w_{args.cores}c_{args.memory_gb}G",
+    default_cluster_name="slurm",
+    default_compute_resources={
+        "queue": "all.q",
+        "cores": args.cores,
+        "memory": f"{args.memory_gb}G",
+        "runtime": f"{args.runtime_min}m",
+        "project": project,
+    },
+    default_resource_scales={
+        "memory": 1.5,
+        "runtime": 1.5,
+    },
+    command_template=(
+        f"python {MAIN_SCRIPT} "
+        "--source_id {source_id} "
+        "--variant_label {variant_label} "
+        "--experiment_id {experiment_id} "
+        "--batch_year {batch_year} "
+        "--basin {basin} "
+        "--num_cores {num_cores}"
+    ),
+    node_args=["source_id", "variant_label", "experiment_id", "batch_year", "basin", "num_cores"],
+    task_args=[],
+    op_args=[],
+)
 
-# Get unique combinations of runtime, cores, and memory
-unique_configs = remaining_long[['max_run_time', 'num_cores', 'memory_req']].drop_duplicates()
-
-# Create task templates for each unique configuration
-task_templates = {}
-for _, config in unique_configs.iterrows():
-    config_key = f"{config['max_run_time']}_{config['num_cores']}_{config['memory_req']}"
-
-    task_templates[config_key] = tool.get_task_template(
-        template_name=f"CLIMADA_stage2_{config['max_run_time']}m_{config['num_cores']}w_{TASK_CORES}c_{config['memory_req']}",
-        default_cluster_name="slurm",
-        default_compute_resources={
-            "queue": "all.q",
-            "cores": TASK_CORES,
-            "memory": config['memory_req'],
-            "runtime": f"{int(config['max_run_time'])}m",
-            "project": project,
-        },
-        command_template=(
-            f"python {MAIN_SCRIPT} "
-            "--storm_draw {storm_draw} "
-            "--source_id {source_id} "
-            "--variant_label {variant_label} "
-            "--experiment_id {experiment_id} "
-            "--batch_year {batch_year} "
-            "--basin {basin} "
-            "--relative_risk {relative_risk} "
-            "--sample_name {sample_name} "
-            "--num_cores {num_cores}"
-        ),
-        node_args=["storm_draw", "source_id", "variant_label", "experiment_id", "batch_year", "basin", "relative_risk", "sample_name", "num_cores"],
-        task_args=[],
-        op_args=[],
-    )
-
-
-# Create tasks using the appropriate template
-tasks = []
-for row in remaining_long.itertuples():
-    config_key = f"{row.max_run_time}_{row.num_cores}_{row.memory_req}"
-    template = task_templates[config_key]
-
-    task = template.create_task(
+tasks = [
+    task_template.create_task(
         name=(
-            f"CLIMADA_stage2_"
-            f"sd{row.storm_draw}_"
-            f"src{row.source_id}_"
-            f"var{row.variant_label}_"
-            f"exp{row.experiment_id}_"
-            f"yr{row.batch_year}_"
-            f"{row.basin}_"
-            f"{row.relative_risk}_"
-            f"{row.sample_name}_"
-            f"rt{row.max_run_time}m_"
-            f"mem{row.memory_req}_"
-            f"w{row.num_cores}_c{TASK_CORES}"
+            f"CLIMADA_stage2_{row.source_id}_{row.variant_label}_{row.experiment_id}_"
+            f"{row.batch_year}_{row.basin}"
         ),
-        storm_draw=row.storm_draw,
         source_id=row.source_id,
         variant_label=row.variant_label,
         experiment_id=row.experiment_id,
         batch_year=row.batch_year,
         basin=row.basin,
-        relative_risk=row.relative_risk,
-        sample_name=row.sample_name,
-        num_cores=row.num_cores,
+        num_cores=WORKERS,
     )
+    for row in remaining.itertuples(index=False)
+]
 
-    tasks.append(task)
-
-print(f"Number of tasks: {len(tasks)}")
-print(f"Number of task templates created: {len(task_templates)}")
+print(f"Number of tasks: {len(tasks)} ({args.cores} cores, {WORKERS} workers, "
+      f"{args.memory_gb}G, {args.runtime_min} min, at most {args.max_concurrent} at once)")
 
 if tasks:
     workflow.add_tasks(tasks)
@@ -430,6 +339,11 @@ for level, (count_script, count_parquet) in COUNT_JOBS.items():
 if count_tasks:
     workflow.add_tasks(count_tasks)
     print(f"✅ {len(count_tasks)} Stage 3 count task(s) added downstream of the Stage 2 tasks.")
+
+if args.dry_run:
+    print("DRY RUN: not binding or submitting. Combos that would run:")
+    print(remaining.groupby(["basin", "source_id"]).size().unstack(fill_value=0).to_string())
+    raise SystemExit(0)
 
 try:
     workflow.bind()

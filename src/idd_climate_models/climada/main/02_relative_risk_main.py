@@ -1,3 +1,4 @@
+import gdal_env  # noqa: F401  (sets GDAL_DATA/PROJ_DATA before rasterio is used)
 from pathlib import Path
 from typing import NamedTuple
 import xarray as xr  # type: ignore
@@ -17,34 +18,13 @@ from rra_tools.parallel import run_parallel  # type: ignore
 from storm_zarr import open_storm
 from rasterra import RasterArray  # type: ignore
 
-parser = argparse.ArgumentParser(description="Run CLIMADA code")
-
-# Define arguments
-parser.add_argument("--storm_draw", type=str, required=True, help="Storm draw number storm_0000 to storm_0099")
-parser.add_argument("--source_id", type=str, required=True, help="Source Id")
-parser.add_argument("--variant_label", type=str, required=True, help="Variant Label")
-parser.add_argument("--experiment_id", type=str, required=True, help="Experiment Id")
-parser.add_argument("--batch_year", type=str, required=True, help="Batch Year")
-parser.add_argument("--basin", type=str, required=True, help="Basin")
-parser.add_argument("--relative_risk", type=str, required=True, help="Relative risk type")
-parser.add_argument("--sample_name", type=str, required=True, help="Sample name for relative risk")
-parser.add_argument("--num_cores", type=int, required=True, help="Number of cores to use for parallel processing")
-
-# Parse arguments
-args = parser.parse_args()
-storm_draw = args.storm_draw
-source_id = args.source_id
-variant_label = args.variant_label
-experiment_id = args.experiment_id
-batch_year = args.batch_year
-basin = args.basin
-relative_risk = args.relative_risk
-sample_name = args.sample_name
-num_cores = args.num_cores
-
 # Constants
 ROOT_PATH = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage1_v3")
 SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage2_v3")
+STORM_DRAW_TABLE_PATH = Path("/mnt/team/rapidresponse/pub/tropical-storms/storm_draw_table.csv")
+# Causes in storm_draw_table.csv; each storm draw has one RR sample per cause.
+RELATIVE_RISKS = ["indirect_resp_draw", "indirect_cvd_draw"]
+N_DRAWS = 100  # stage 1 draws per combo; each output is their mean
 
 # Fixed impact duration per storm-affected pixel (days), expressed as a
 # year-fraction for the PAF formula: PAF = (RR - 1) / RR * (days / 365).
@@ -240,41 +220,26 @@ def build_rr_interpolator(
     )
 
 
-def interpolate_rr_from_windspeed(
-    intensity_array: xr.DataArray,
-    rr_ctx: RRInterpolator,
-) -> xr.DataArray:
+def rr_from_windspeed(windspeed_ms: np.ndarray, rr_ctx: RRInterpolator) -> np.ndarray:
     """
-    Interpolate relative risk for a windspeed intensity array (m/s) using a
-    pre-built RR interpolation context. Pixels outside the RR table's
-    windspeed range get 0 (below min) or the table's max RR (above max).
+    Relative risk for windspeeds (m/s) from a pre-built RR interpolation
+    context. Pixels outside the RR table's windspeed range get 0 (below min)
+    or the table's max RR (above max); NaN windspeeds get 0. Same dtype as the
+    input.
     """
-    intensity_values = intensity_array.values
-    rr_interpolated = np.zeros_like(intensity_values)
+    rr = np.zeros_like(windspeed_ms)
 
-    above_max_mask = intensity_values > rr_ctx.max_ms
-    interpolation_mask = (
-        (intensity_values >= rr_ctx.min_ms) & (intensity_values <= rr_ctx.max_ms)
-    )
+    above_max_mask = windspeed_ms > rr_ctx.max_ms
+    interpolation_mask = (windspeed_ms >= rr_ctx.min_ms) & (windspeed_ms <= rr_ctx.max_ms)
 
     if np.any(above_max_mask):
-        rr_interpolated[above_max_mask] = rr_ctx.max_rr
+        rr[above_max_mask] = rr_ctx.max_rr
 
     if np.any(interpolation_mask):
-        rr_interpolated[interpolation_mask] = rr_ctx.interp(
-            intensity_values[interpolation_mask]
-        )
+        rr[interpolation_mask] = rr_ctx.interp(windspeed_ms[interpolation_mask])
 
-    # Construct a fresh DataArray with the same coords/dims/attrs as the input.
-    # dict(intensity_array.attrs) makes a shallow copy so downstream attr
-    # mutation (in generate_relative_risk) doesn't bleed into the source DA.
-    return xr.DataArray(
-        rr_interpolated,
-        coords=intensity_array.coords,
-        dims=intensity_array.dims,
-        attrs=dict(intensity_array.attrs),
-        name=f"relative_risk_{rr_ctx.sample_name}",
-    )
+    return rr
+
 def generate_basin_template_raster(basin, res=0.1, buffer_deg=5.0):
     basin_bounds = {
         'EP': ['180E', '0N', '290E', '60N'],
@@ -384,38 +349,6 @@ def load_relative_risk_df(relative_risk: str,root: Path = Path("/mnt/team/rapidr
 
 
 ##########################################
-#        Calculate Relative Risk         #
-##########################################
-
-def generate_relative_risk(
-    da_intensity: xr.DataArray,
-    rr_ctx: RRInterpolator,
-) -> xr.DataArray:
-    """
-    Generate per-storm pixel-level relative risk from storm intensity using
-    the pre-built per-draw RR interpolation context.
-    """
-    storm_name = da_intensity.attrs.get("storm_name", "none")
-
-    da_rr = interpolate_rr_from_windspeed(da_intensity, rr_ctx)
-
-    da_rr.attrs.update({
-        "description": "Pixel-level relative risk derived from storm maximum wind speed",
-        "storm_name": storm_name,
-        "start_date": da_intensity.attrs.get("start_date"),
-        "end_date": da_intensity.attrs.get("end_date"),
-        "basin": da_intensity.attrs.get("basin"),
-        "category": da_intensity.attrs.get("category"),
-        "rr_sample": rr_ctx.sample_name,
-        "definition": (
-            "Relative risk interpolated from windspeed using empirical RR curves; "
-            "intensity is maximum per-pixel wind speed during storm lifetime"
-        ),
-    })
-
-    return da_rr
-
-##########################################
 #          Save Yearly-Basin Raster      #
 ##########################################
 
@@ -500,47 +433,6 @@ def _is_valid_raster(path: Path) -> bool:
         return False   
 
 
-def check_if_draw_complete(
-    storm_draw: str,
-    source_id: str,
-    variant_label: str,
-    experiment_id: str,
-    batch_year: str,
-    basin: str,
-    relative_risk: str,
-    sample_name: str,
-    save_root: Path = SAVE_ROOT,
-):
-    """
-    Check if the expected output rasters for a draw already exist.
-
-    Returns True if all expected rasters are present, False otherwise.
-    """
-    start_year, end_year = batch_year.split("-")
-    years = range(int(start_year), int(end_year) + 1)
-
-    for year in years:
-        save_dir = save_root / storm_draw / source_id / variant_label / experiment_id / batch_year / str(year) / basin / "raw_paf"
-        filename = (
-            f"draw_mean_raw_paf_{storm_draw}_{relative_risk}_{sample_name}_{basin}_{source_id}_"
-            f"{experiment_id}_{variant_label}_{start_year}01_{end_year}12_{year}.tif"
-        )
-        save_path = save_dir / filename
-        if not save_path.exists():
-            return False
-
-        if save_path.stat().st_size < 1024:
-            save_path.unlink(missing_ok=True)
-            print(f"⚠️ Found invalid raster (size < 1KB): {save_path}. Deleting and marking draw as incomplete.")
-            return False
-
-        if not _is_valid_raster(save_path):
-            save_path.unlink(missing_ok=True)
-            print(f"⚠️ Found invalid raster (failed to load): {save_path}. Deleting and marking draw as incomplete.")
-            return False
-
-    return True
-
 def get_year_status(
     storm_draw: str,
     source_id: str,
@@ -586,35 +478,132 @@ def get_year_status(
 #          Main Stage 2 Function         #
 ##########################################
 
-def process_single_draw(draw):
+class Stage2Job(NamedTuple):
+    """One output series of a combo: a storm draw's RR sample for one cause."""
+    storm_draw: str
+    relative_risk: str
+    sample_name: str
+    years: tuple[int, ...]  # years whose raster is missing on disk
+
+
+def build_jobs(
+    source_id: str,
+    variant_label: str,
+    experiment_id: str,
+    batch_year: str,
+    basin: str,
+    save_root: Path = SAVE_ROOT,
+) -> list[Stage2Job]:
+    """Every (storm draw x cause) of this combo that still has a missing year.
+
+    The storm draws are those of (source_id, variant_label) in
+    storm_draw_table.csv; each has one RR sample per cause.
     """
-    Process a single draw of storms and return (yearly raw PAF rasters,
-    failures), where failures is a list of (year, storm_id) for storms that
-    raised. A year with any failure must not be saved — its PAF would be
-    silently missing that storm's contribution.
-    Uses storm metadata to avoid loading full datasets until necessary.
+    table = pd.read_csv(STORM_DRAW_TABLE_PATH)
+    table = table[(table["source_id"] == source_id) & (table["variant_label"] == variant_label)]
+    jobs = []
+    for row in table.sort_values("storm_draw").itertuples(index=False):
+        storm_draw = f"storm_draw_{row.storm_draw:04d}"
+        for relative_risk in RELATIVE_RISKS:
+            sample_name = getattr(row, relative_risk)
+            _, missing_years = get_year_status(
+                storm_draw=storm_draw,
+                source_id=source_id,
+                variant_label=variant_label,
+                experiment_id=experiment_id,
+                batch_year=batch_year,
+                basin=basin,
+                relative_risk=relative_risk,
+                sample_name=sample_name,
+                save_root=save_root,
+            )
+            if missing_years:
+                jobs.append(Stage2Job(storm_draw, relative_risk, sample_name, tuple(missing_years)))
+    return jobs
+
+
+def add_storm_paf(
+    year_sums: list[np.ndarray],
+    storm_ds: xr.Dataset,
+    rr_ctxs: list[RRInterpolator],
+    template_raster,
+) -> None:
+    """Add one storm's raw PAF to each job's basin-grid yearly sum (in place).
+
+    The storm's intensity is resampled to the basin grid once and each job's
+    RR curve is applied there. RR is computed pixel by pixel and the resample
+    is nearest-neighbour, so this equals resampling each job's RR raster
+    (checked bit for bit on 267 storms x 6-12 RR samples in NA, EP and SP).
+    """
+    intensity = to_raster(
+        ds=storm_ds["intensity"],
+        no_data_value=np.nan,
+        lat_col="lat",
+        lon_col="lon",
+        crs="EPSG:4326",
+        expected_res=template_raster.transform.a,
+    ).resample_to(target=template_raster, resampling="nearest")._ndarray
+
+    # Work in the window that holds the storm's footprint.
+    finite = np.isfinite(intensity)
+    if not finite.any():
+        return
+    rows = np.flatnonzero(finite.any(axis=1))
+    cols = np.flatnonzero(finite.any(axis=0))
+    r0, r1, c0, c1 = rows[0], rows[-1] + 1, cols[0], cols[-1] + 1
+    windspeed = intensity[r0:r1, c0:c1]
+
+    for total, rr_ctx in zip(year_sums, rr_ctxs):
+        rr = rr_from_windspeed(windspeed, rr_ctx)
+        # Pixels with a positive RR contribute; NaN windspeeds have RR 0.
+        mask = rr > 0
+        if mask.any():
+            # Every masked pixel sees a constant 20-day impact, so the
+            # year-fraction collapses to IMPACT_DAYS_FRACTION.
+            total[r0:r1, c0:c1][mask] += (rr[mask] - 1) / rr[mask] * IMPACT_DAYS_FRACTION
+
+
+def crop_nonzero(arr: np.ndarray) -> tuple[int, int, np.ndarray] | None:
+    """(row0, col0, sub-array) covering every nonzero pixel, or None if all zero.
+
+    Adding the sub-array at (row0, col0) gives exactly the same sum as adding
+    the full array, since x + 0.0 == x.
+    """
+    rows = np.flatnonzero(arr.any(axis=1))
+    if rows.size == 0:
+        return None
+    cols = np.flatnonzero(arr.any(axis=0))
+    r0, r1, c0, c1 = rows[0], rows[-1] + 1, cols[0], cols[-1] + 1
+    return int(r0), int(c0), arr[r0:r1, c0:c1].copy()
+
+
+def process_single_draw(args):
+    """
+    Process one stage 1 draw for every job of the combo.
+
+    Each storm is read once: it is loaded for the first year it covers and kept
+    until its last year. For every job that still needs a year, the storm's
+    raw PAF is added to that job's yearly sum, in the same storm order as the
+    per-job code before (so each job's sums are unchanged).
+
+    Returns (sums, failures): sums maps (job index, year) to a cropped
+    (row0, col0, array) of that draw's yearly raw PAF (all-zero sums omitted);
+    failures lists (year, storm_id) for storms that raised. A year with any
+    failure must not be saved; its PAF would be missing that storm.
     """
     (
-        storm_draw,
         source_id,
         variant_label,
         experiment_id,
         batch_year,
         basin,
         draw,
-        relative_risk,
-        sample_name,
+        jobs,
         template_raster,
-        rr_samples_df,
-        invalid_years,
-    ) = draw
+        rr_tables,
+        years,
+    ) = args
 
-    # Build the RR interpolation context once per worker (per draw). Every
-    # storm in this draw reuses the same interp1d + bounds instead of
-    # rebuilding them per storm.
-    rr_ctx = build_rr_interpolator(rr_samples_df, sample_name)
-
-    # Path to the intensity draw
     intensity_draw_store = get_draw_zarr_path(
         source_id=source_id,
         variant_label=variant_label,
@@ -624,74 +613,47 @@ def process_single_draw(draw):
         draw=draw,
         metric="intensity",
     )
-
-    # If no intensity data exists, return empty rasters
+    # No stage 1 store, or no storms: this draw adds zero everywhere.
     if intensity_draw_store is None or not any(intensity_draw_store.iterdir()):
-        yearly_paf = {year: np.zeros_like(template_raster._ndarray, dtype=np.float32) for year in invalid_years}
-        print(f"⚠️ Draw {draw} has no intensity data. Returning empty rasters for basin {basin}, batch {batch_year}")
-        return yearly_paf, []
+        print(f"⚠️ Draw {draw} has no intensity data (basin {basin}, batch {batch_year}).")
+        return {}, []
 
+    # Build each job's RR interpolation once per draw; every storm reuses it.
+    rr_ctxs = [build_rr_interpolator(rr_tables[job.relative_risk], job.sample_name) for job in jobs]
 
+    storms_meta = iter_storms_metadata(intensity_draw_store)
+    storms_by_year = map_storms_to_years(storms_meta, years)
+    last_year = {path: year for year in years for path in storms_by_year[year]}
 
-    # Initialize output dictionaries
-    yearly_paf = {}
+    loaded: dict[Path, xr.Dataset] = {}  # storms kept for a later year
+    sums: dict[tuple[int, int], tuple[int, int, np.ndarray]] = {}
     failures: list[tuple[int, str]] = []
 
-    # --- STEP 1: Get metadata for all storms in the draw ---
-    storms_meta = iter_storms_metadata(intensity_draw_store)  # returns list of StormMeta
-    storms_by_year = map_storms_to_years(storms_meta, invalid_years)
-
-    # --- STEP 2: Process each year individually ---
-    for year in invalid_years:
+    for year in years:
         storm_paths_in_year = storms_by_year[year]
-
-        # Skip years with no storms
-        if not storm_paths_in_year:
-            yearly_paf[year] = np.zeros_like(template_raster._ndarray, dtype=np.float32)
+        active = [i for i, job in enumerate(jobs) if year in job.years]
+        if not storm_paths_in_year or not active:
             continue
 
-        # Initialize cumulative arrays for this year
-        sum_raw_paf = np.zeros_like(template_raster._ndarray, dtype=np.float32)
+        year_sums = {i: np.zeros_like(template_raster._ndarray, dtype=np.float32) for i in active}
 
-        # --- STEP 3: Process each storm ---
         for storm_path in storm_paths_in_year:
             storm_id = storm_path.name  # fallback identifier if open fails
             try:
-                with open_storm(storm_path, chunks="auto") as storm_ds:
-                    storm_ds = ensure_min_grid(storm_ds)
-                    storm_id = storm_ds.attrs.get("storm_id", storm_path.name)
-
+                storm_ds = loaded.pop(storm_path, None)
+                if storm_ds is None:
+                    with open_storm(storm_path, chunks="auto") as raw:
+                        storm_ds = ensure_min_grid(raw.load())
                     if basin == "NA":
                         storm_ds = normalize_dataset(storm_ds)
+                storm_id = storm_ds.attrs.get("storm_id", storm_path.name)
 
-                    rr_da = generate_relative_risk(
-                        da_intensity=storm_ds["intensity"],
-                        rr_ctx=rr_ctx,
-                    )
-                    rr_da = rr_da.where(rr_da > 0)
+                add_storm_paf(
+                    [year_sums[i] for i in active], storm_ds, [rr_ctxs[i] for i in active], template_raster
+                )
 
-                    storm_rr = to_raster(
-                        ds=rr_da,
-                        no_data_value=np.nan,
-                        lat_col="lat",
-                        lon_col="lon",
-                        crs="EPSG:4326",
-                        expected_res=template_raster.transform.a,
-                    ).resample_to(target=template_raster, resampling="nearest")
-                    rr_values = storm_rr._ndarray
-
-                    # Pixels with a positive, finite RR contribute. NumPy `>`
-                    # returns False on NaN, so `rr_values > 0` already excludes
-                    # the NaN pixels from `where(rr_da > 0)` above.
-                    mask = rr_values > 0
-                    if mask.any():
-                        # Every masked pixel sees a constant 20-day impact, so
-                        # the year-fraction collapses to IMPACT_DAYS_FRACTION.
-                        sum_raw_paf[mask] += (
-                            (rr_values[mask] - 1) / rr_values[mask] * IMPACT_DAYS_FRACTION
-                        )
-
-                    del storm_rr, mask, rr_values, rr_da
+                if last_year[storm_path] > year:
+                    loaded[storm_path] = storm_ds
             except Exception as e:
                 print(
                     f"❌ Storm {storm_id} failed in draw {draw} "
@@ -702,103 +664,58 @@ def process_single_draw(draw):
                 failures.append((year, str(storm_id)))
                 continue
 
-        # End of year calculations
-        yearly_paf[year] = sum_raw_paf
-
-        # Clean up
-        del sum_raw_paf
+        for i, arr in year_sums.items():
+            cropped = crop_nonzero(arr)
+            if cropped is not None:
+                sums[(i, year)] = cropped
+        del year_sums
         gc.collect()
 
     print(f"Completed draw {draw} for basin {basin}, batch {batch_year}")
-    return yearly_paf, failures
+    return sums, failures
+
 
 def main(
-    storm_draw: str,
     source_id: str,
     variant_label: str,
     experiment_id: str,
     batch_year: str,
     basin: str,
-    relative_risk: str,
-    sample_name: str,
     num_cores: int,
     save_root: Path = SAVE_ROOT,
 ):
-    
-    # check if output already exists for this draw - if so, skip processing
-    if check_if_draw_complete(
-        storm_draw=storm_draw,
-        source_id=source_id,
-        variant_label=variant_label,
-        experiment_id=experiment_id,
-        batch_year=batch_year,
-        basin=basin,
-        relative_risk=relative_risk,
-        sample_name=sample_name,
-        save_root=save_root,
-    ):
-        print(f"✅ Output rasters already exist for draw {storm_draw}. Skipping processing.")
+    """Write the draw-mean raw PAF rasters of every storm draw x cause of one combo.
+
+    Each stage 1 storm of the combo is read once per draw and applied to every
+    job's RR sample, instead of once per (storm draw, cause) task.
+    """
+    jobs = build_jobs(source_id, variant_label, experiment_id, batch_year, basin, save_root)
+    if not jobs:
+        print(f"✅ All outputs exist for {source_id}/{variant_label}/{experiment_id}/{batch_year}/{basin}. Skipping.")
         return None
 
-    valid_years, invalid_years = get_year_status(
-        storm_draw=storm_draw,
-        source_id=source_id,
-        variant_label=variant_label,
-        experiment_id=experiment_id,
-        batch_year=batch_year,
-        basin=basin,
-        relative_risk=relative_risk,
-        sample_name=sample_name,
-        save_root=save_root,
-    )
-
-    if len(invalid_years) == 0:
-        print(f"✅ All years valid for draw {storm_draw}. Skipping.")
-        return None
-
-    print(f"Recomputing years: {invalid_years}")
-    draws = list(range(100))
-
-    # Define batch size based on number of cores
-    batch_size = num_cores
+    years = sorted({year for job in jobs for year in job.years})
+    print(f"{len(jobs)} job(s) (storm draw x cause) to compute; years {years}")
 
     # Generate basin-wide template raster once
     template_raster = generate_basin_template_raster(basin, res=0.1)
-    # Load relative risk table
-    rr_samples_df = load_relative_risk_df(relative_risk=relative_risk)
+    rr_tables = {rr: load_relative_risk_df(relative_risk=rr) for rr in {job.relative_risk for job in jobs}}
 
-    # Initialize cumulative dictionaries to hold sums across draws
-    cumulative_paf = {
-        year: np.zeros_like(template_raster._ndarray, dtype=np.float32)
-        for year in invalid_years
-    }
+    # Sums across draws, per (job index, year); allocated on first contribution.
+    cumulative_paf: dict[tuple[int, int], np.ndarray] = {}
     # (draw, year, storm_id) for every storm that raised in any draw
     failed_storms: list[tuple[int, int, str]] = []
 
-    for batch_start in range(0, len(draws), batch_size):
-        batch_draws = draws[batch_start: batch_start + batch_size]
+    draws = list(range(N_DRAWS))
+    for batch_start in range(0, len(draws), num_cores):
+        batch_draws = draws[batch_start: batch_start + num_cores]
         print(f"Starting batch {batch_draws}")
-        
-        # Prepare arguments for process_single_draw
+
         draw_args = [
-            (
-                storm_draw,
-                source_id,
-                variant_label,
-                experiment_id,
-                batch_year,
-                basin,
-                draw,
-                relative_risk,
-                sample_name,
-                template_raster,
-                rr_samples_df,
-                invalid_years,
-            )
+            (source_id, variant_label, experiment_id, batch_year, basin,
+             draw, jobs, template_raster, rr_tables, years)
             for draw in batch_draws
         ]
-
-        # Run parallel for this batch
         batch_results = run_parallel(
             runner=process_single_draw,
             arg_list=draw_args,
@@ -806,46 +723,43 @@ def main(
         )
         print(f"Parallel job stage done for draw_batch: {batch_draws}")
 
-        # batch_results is a list of (yearly_paf, failures) returned from each draw
-        for draw, (draw_yearly_paf, draw_failures) in zip(batch_draws, batch_results):
+        # Add draws in draw order, as before, so each job's float sums are unchanged.
+        for draw, (draw_sums, draw_failures) in zip(batch_draws, batch_results):
             failed_storms.extend((draw, year, sid) for year, sid in draw_failures)
-            for year in invalid_years:
-                arr = draw_yearly_paf.get(year)
-                if arr is not None:
-                    cumulative_paf[year] += arr
+            for key, (r0, c0, sub) in draw_sums.items():
+                total = cumulative_paf.get(key)
+                if total is None:
+                    total = cumulative_paf[key] = np.zeros_like(template_raster._ndarray, dtype=np.float32)
+                total[r0:r0 + sub.shape[0], c0:c0 + sub.shape[1]] += sub
 
-    # After summing all draws, take the average
-    n_draws = len(draws)
-    final_paf = {year: arr / n_draws for year, arr in cumulative_paf.items()}
-
-    # Years with a failed storm are not saved, so they stay invalid and are
-    # recomputed on the retry; the other years are saved now.
+    # Years with a failed storm are not saved for any job, so they stay
+    # missing and are recomputed on the retry; the other years are saved now.
     failed_years = sorted({year for _, year, _ in failed_storms})
 
-    # Save to disk per year, collecting the written paths for a single chmod
-    # sweep at the end (avoids one os.walk per year).
     saved_paths: list[Path] = []
-    for year in invalid_years:
-        if year in failed_years:
-            continue
-        arr = final_paf[year]
-
-        save_path = save_raster(
-            raster_data=arr,
-            template_raster=template_raster,
-            storm_draw=storm_draw,
-            source_id=source_id,
-            variant_label=variant_label,
-            sample_name=sample_name,
-            relative_risk=relative_risk,
-            experiment_id=experiment_id,
-            batch_year=batch_year,
-            basin=basin,
-            year=year,
-            metric="raw_paf",
-            save_root=save_root,
-        )
-        saved_paths.append(save_path)
+    for i, job in enumerate(jobs):
+        for year in job.years:
+            if year in failed_years:
+                continue
+            total = cumulative_paf.get((i, year))
+            if total is None:
+                total = np.zeros_like(template_raster._ndarray, dtype=np.float32)
+            save_path = save_raster(
+                raster_data=total / N_DRAWS,
+                template_raster=template_raster,
+                storm_draw=job.storm_draw,
+                source_id=source_id,
+                variant_label=variant_label,
+                sample_name=job.sample_name,
+                relative_risk=job.relative_risk,
+                experiment_id=experiment_id,
+                batch_year=batch_year,
+                basin=basin,
+                year=year,
+                metric="raw_paf",
+                save_root=save_root,
+            )
+            saved_paths.append(save_path)
 
     # Fix permissions on the files we wrote (and their immediate parents so
     # the group can traverse). No recursive walk needed — we know exactly
@@ -866,17 +780,26 @@ def main(
         )
         raise SystemExit(1)
 
-    print(f"Completed all draws for basin {basin}, batch {batch_year}")
+    print(f"Completed {len(jobs)} job(s) for basin {basin}, batch {batch_year}")
 
 
-main(
-    storm_draw=storm_draw,
-    source_id=source_id,
-    variant_label=variant_label,
-    experiment_id=experiment_id,
-    batch_year=batch_year,
-    basin=basin,
-    relative_risk=relative_risk,
-    sample_name=sample_name,
-    num_cores=num_cores,
-)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="CLIMADA stage 2: draw-mean raw PAF rasters for every storm draw x cause of one combo"
+    )
+    parser.add_argument("--source_id", type=str, required=True, help="Source Id")
+    parser.add_argument("--variant_label", type=str, required=True, help="Variant Label")
+    parser.add_argument("--experiment_id", type=str, required=True, help="Experiment Id")
+    parser.add_argument("--batch_year", type=str, required=True, help="Batch Year")
+    parser.add_argument("--basin", type=str, required=True, help="Basin")
+    parser.add_argument("--num_cores", type=int, required=True, help="Number of cores to use for parallel processing")
+    args = parser.parse_args()
+
+    main(
+        source_id=args.source_id,
+        variant_label=args.variant_label,
+        experiment_id=args.experiment_id,
+        batch_year=args.batch_year,
+        basin=args.basin,
+        num_cores=args.num_cores,
+    )
