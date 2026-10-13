@@ -1,6 +1,7 @@
 import gdal_env  # noqa: F401  (sets GDAL_DATA/PROJ_DATA before rasterio is used)
 from pathlib import Path
 import numpy as np  # type: ignore
+import functools
 import os
 import rasterra as rt  # type: ignore
 import pandas as pd  # type: ignore
@@ -231,11 +232,17 @@ def clean_paf_raster(raw_paf_raster):
 #           Load Shapefile               #
 ##########################################
 
+# The loaders below are cached per process: callers only filter or clip the
+# returned frames (which copies), never modify them. `main` loads them before
+# the per-year workers fork, so the workers reuse them instead of each reading
+# the files again.
+@functools.lru_cache(maxsize=1)
 def load_shapefiles():
     shapefile=gpd.read_parquet(GDF_PATH)
 
     return shapefile
 
+@functools.lru_cache(maxsize=1)
 def load_shapefiles_normalized(
     shapefile_root: Path = SHP_ROOT_NORMALIZED,
 ) -> gpd.GeoDataFrame:
@@ -249,6 +256,7 @@ def load_shapefiles_normalized(
 ##########################################
 #           Load Population              #
 ##########################################
+@functools.lru_cache(maxsize=1)
 def load_population_dataframe():
     pop_df = pd.read_parquet(POP_TOTALS_PATH)
 
@@ -837,6 +845,14 @@ def main(
         )
         for year in years
     ]
+
+    # Read the admin shapes and population totals once here, before the
+    # per-year workers fork; each worker then reuses the cached copies.
+    if basin == "NA":
+        load_shapefiles_normalized()
+    else:
+        load_shapefiles()
+    load_population_dataframe()
 
     failed_by_year = run_parallel(
         runner=process_single_year,

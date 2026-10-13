@@ -858,6 +858,9 @@ Inside a task:
   size (EC-Earth3 ssp585 2020–2024 EP, 58 jobs): 16 min, 96% of 1 core, peak
   2.6 GB. A small one (MRI-ESM2-0 r4 historical 1970–1974 SP, 6 jobs): 103 s,
   0.3 GB. `--pilot N` submits ~N combos spread over basins (no count tasks).
+- Pilot (workflow 638451, 2026-10-13, 42 combos, 6 per basin): all done on
+  the first attempt; runtime median ~6 min, max 20.8 min (WP MPI-ESM1-2-HR);
+  peak memory 2.9 GB (EP EC-Earth3); all 4,606 expected GeoTIFFs present.
 - `PRIORITY_MODE = "all"`: every storm draw (the priority list no longer
   orders tasks, since a task covers all storm draws of a combo).
 - **Downstream Stage 3 count tasks** (`CLIMADA_stage2_admin{0,1}_counts`):
