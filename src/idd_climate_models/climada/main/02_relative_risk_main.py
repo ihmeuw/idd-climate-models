@@ -9,6 +9,7 @@ from affine import Affine  # type: ignore
 import os
 import argparse
 import gc
+import json
 import re
 import time
 import traceback
@@ -69,16 +70,15 @@ def iter_storms_metadata(draw_store: Path) -> list[StormMeta]:
 
     storms_meta = []
     for storm_path in storm_paths:
-        ds = None
-        try:
-            ds = xr.open_zarr(storm_path, consolidated=False, zarr_format=3, chunks={})  # lazy read, no load
-            start_year = pd.to_datetime(ds.attrs["start_date"]).year
-            end_year = pd.to_datetime(ds.attrs["end_date"]).year
-            storm_id = ds.attrs.get("storm_id", storm_path.name)
-            storms_meta.append(StormMeta(storm_path, start_year, end_year, storm_id))
-        finally:
-            if ds is not None:
-                ds.close()
+        # The dates are attributes of the storm group: read its zarr.json (one
+        # file) instead of xr.open_zarr, which also reads every array's
+        # metadata and the lat/lon chunks.
+        with open(storm_path / "zarr.json") as f:
+            attrs = json.load(f).get("attributes", {})
+        start_year = pd.to_datetime(attrs["start_date"]).year
+        end_year = pd.to_datetime(attrs["end_date"]).year
+        storm_id = attrs.get("storm_id", storm_path.name)
+        storms_meta.append(StormMeta(storm_path, start_year, end_year, storm_id))
     return storms_meta
 
 def map_storms_to_years(storms_meta: list[StormMeta], years: list[int]):
