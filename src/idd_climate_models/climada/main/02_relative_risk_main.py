@@ -14,6 +14,7 @@ import re
 import time
 import traceback
 from rra_tools.parallel import run_parallel  # type: ignore
+from storm_zarr import open_storm
 from rasterra import RasterArray  # type: ignore
 
 parser = argparse.ArgumentParser(description="Run CLIMADA code")
@@ -656,7 +657,7 @@ def process_single_draw(draw):
         for storm_path in storm_paths_in_year:
             storm_id = storm_path.name  # fallback identifier if open fails
             try:
-                with xr.open_zarr(storm_path, consolidated=False, zarr_format=3, chunks="auto") as storm_ds:
+                with open_storm(storm_path, chunks="auto") as storm_ds:
                     storm_ds = ensure_min_grid(storm_ds)
                     storm_id = storm_ds.attrs.get("storm_id", storm_path.name)
 

@@ -27,6 +27,7 @@ from shapely.geometry import (
 from shapely.ops import split, unary_union
 import re
 from rasterra import RasterArray  # type: ignore
+from storm_zarr import open_storm
 
 warnings.simplefilter("ignore", FutureWarning)
 
@@ -466,10 +467,8 @@ def get_exposure_storm_from_draw(
     if not storm_path.exists():
         raise FileNotFoundError(f"Storm {storm_id} not found in draw store {draw_store}")
     
-    return xr.open_zarr(
+    return open_storm(
         storm_path,
-        consolidated=False,
-        zarr_format=3,  # stage 1 writes format 3; skips probing for .zgroup/.zattrs/.zmetadata
         chunks="auto",   # critical for raster ops
         decode_times=False,
     )
@@ -1034,7 +1033,7 @@ def process_single_storm(
     storm_records = []
     storm_path = intensity_draw_store / f"storm_{int(storm_id):04d}"
 
-    storm_ds = xr.open_zarr(storm_path, consolidated=False, zarr_format=3, chunks="auto")
+    storm_ds = open_storm(storm_path, chunks="auto")
     start_date = storm_ds.attrs.get("start_date", "unknown")
     year = pd.to_datetime(start_date).year if start_date != "unknown" else "unknown"
 

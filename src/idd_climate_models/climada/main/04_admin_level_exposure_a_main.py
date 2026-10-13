@@ -30,6 +30,7 @@ from rra_tools.parallel import run_parallel  # type: ignore
 import pyarrow.parquet as pq  # type: ignore
 import re
 from rasterra import RasterArray  # type: ignore
+from storm_zarr import open_storm
 
 warnings.simplefilter("ignore", FutureWarning)
 
@@ -440,10 +441,8 @@ def get_exposure_storm_from_draw(
     if not storm_path.exists():
         raise FileNotFoundError(f"Storm {storm_id} not found in draw store {draw_store}")
     
-    return xr.open_zarr(
+    return open_storm(
         storm_path,
-        consolidated=False,
-        zarr_format=3,  # stage 1 writes format 3; skips probing for .zgroup/.zattrs/.zmetadata
         chunks="auto",   # critical for raster ops
         decode_times=False,
     )
@@ -1152,7 +1151,7 @@ def process_single_draw(args) -> list:
             storm_id = storm_path.name  # fallback for error msg before zarr open
 
             try:
-                storm_ds = xr.open_zarr(storm_path, consolidated=False, zarr_format=3, chunks="auto")
+                storm_ds = open_storm(storm_path, chunks="auto")
                 storm_id = storm_ds.attrs.get("storm_id", storm_path.name)
                 print(f"Processing storm id: {storm_id}")
 
