@@ -32,9 +32,16 @@ def save_root_for(admin_level: int) -> Path:
     )
 
 
+# Grouping: 12 draws per task (MAX_GROUP_RUNTIME_MIN / TASK_RUNTIME_MIN).
 TASK_RUNTIME_MIN = 5
-TASK_MEMORY_GB = 5
 MAX_GROUP_RUNTIME_MIN = 60
+# Resources, from v2 admin 1 (workflows 589848, 590184): a 12-draw task needs
+# median 61-76 min, p90 129-147, p95 155-178, max 250; peak memory max 4.13 GB.
+# 120 min lets ~80% finish first time (the old 60 min timed out ~half); retries
+# resume from the last finished draw, so x1.5 per retry (180, 270) is enough.
+TASK_MEMORY_GB = 5
+TASK_RUNTIME_LIMIT_MIN = 120
+RUNTIME_RETRY_SCALE = 1.5
 
 
 def _stage4a_draw_metadata_path(
@@ -221,7 +228,7 @@ def level_tasks(admin_level: int, upstream: list) -> tuple[list, object]:
         )
 
         # All stage-4A tasks share one resource class — a single template suffices.
-        runtime_str = f"{int(np.ceil(MAX_GROUP_RUNTIME_MIN / 10) * 10)}m"
+        runtime_str = f"{TASK_RUNTIME_LIMIT_MIN}m"
         memory_str = f"{TASK_MEMORY_GB}G"
 
         task_template = tool.get_task_template(
@@ -236,7 +243,7 @@ def level_tasks(admin_level: int, upstream: list) -> tuple[list, object]:
             },
             default_resource_scales={
                 "memory": 1.5,
-                "runtime": 3.0,
+                "runtime": RUNTIME_RETRY_SCALE,
             },
             max_attempts=5,
             command_template=(

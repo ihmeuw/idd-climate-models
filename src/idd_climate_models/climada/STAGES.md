@@ -1621,8 +1621,14 @@ storm's intensity footprint intersects. The output defines **which**
 - Draws are packed **12 per Jobmon task** (`MAX_GROUP_RUNTIME_MIN = 60` /
   `TASK_RUNTIME_MIN = 5`) and run serially inside the task. The grouped task
   list is written to `<SAVE_ROOT>/_workflow_grouped_tasks/grouped_tasks_<uuid>.parquet`.
-- Resources: 1 core, 5 G, 60 min, `max_attempts = 5`, retry scaling memory
-  ×1.5 and runtime ×3; `max_concurrently_running = 3000`.
+- Resources (respecced 2026-10-12 from v2 admin 1, workflows 589848 and 590184):
+  1 core, 5 G, **120 min**, `max_attempts = 5`, retry scaling memory ×1.5 and
+  runtime ×1.5; `max_concurrently_running = 3000`. v2 measured a 12-draw task at
+  median 61–76 min (p90 129–147, p95 155–178, max 250) and peak memory ≤ 4.13 GB;
+  the old 60-min limit timed out about half the tasks. Retries resume from the
+  last finished draw, so a time-out loses only the draw in progress. CPU use is
+  ~8% of the core (I/O-bound): running draws in parallel inside a task would be
+  the next efficiency step.
 - `CHECK_COMPLETION = False` (default): every draw is submitted and each worker
   skips completed draws itself. `True` walks the output tree first.
 - Before submitting, exits non-zero unless every draw it is about to submit has
