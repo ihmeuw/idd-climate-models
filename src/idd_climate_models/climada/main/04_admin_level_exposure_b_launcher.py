@@ -22,6 +22,18 @@ CHECK_COMPLETION = True
 MEMORY_MULTIPLIER = 1
 RUNTIME_MULTIPLIER = 1
 
+# ── Per-group SLURM requests ──────────────────────────────────────────────────
+# 4A's size-class memory (3/4/5/10/29/70 G) leaves out a ~7.3 GB baseline every
+# admin 1 group holds. v2 admin 1 (workflows 590392/590614/590669, 731 sampled
+# attempts): the 3G/4G classes peaked at 7.38 GB, 5G at 8.90, 10G at 10.00,
+# 29G at 16.94; 5-6G requests were OOM-killed within 30 s. Admin 1 requests
+# use this map; classes not listed (and admin 0) keep 4A's value.
+ADMIN1_MEMORY_GB = {3: 9, 4: 9, 5: 10, 10: 12, 29: 20}
+# Groups are packed to MAX_GROUP_RUNTIME_MIN of 4A-estimated runtime, but v2
+# admin 1 groups ran at most 0.69x that estimate (p99 0.60, median 0.04).
+# Request this fraction of it; Jobmon's x1.5 retry scale covers the rest.
+RUNTIME_REQUEST_FRACTION = 0.75
+
 CLIMADA_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output")
 SAVE_ROOT = CLIMADA_ROOT / f"stage4b_v3_admin{ADMIN_LEVEL}/"
 SENTINEL_DIR = SAVE_ROOT / "_sentinels"
@@ -175,8 +187,12 @@ group_meta = (
     )
 )
 # Apply multipliers after group assignment so group hashes are unaffected.
+if ADMIN_LEVEL == 1:
+    group_meta["memory_gb"] = group_meta["memory_gb"].map(lambda gb: ADMIN1_MEMORY_GB.get(gb, gb))
 group_meta["memory_gb"] = (group_meta["memory_gb"] * MEMORY_MULTIPLIER).astype(int)
-group_meta["total_runtime_min"] = group_meta["total_runtime_min"] * RUNTIME_MULTIPLIER
+group_meta["total_runtime_min"] = (
+    group_meta["total_runtime_min"] * RUNTIME_MULTIPLIER * RUNTIME_REQUEST_FRACTION
+)
 group_meta["runtime_slot_min"] = (
     (np.ceil(group_meta["total_runtime_min"] / 10) * 10)
     .astype(int)

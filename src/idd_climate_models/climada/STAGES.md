@@ -1926,10 +1926,22 @@ For one `(storm × location_id)`:
   `<SAVE_ROOT>/_sentinels/<group_hash>.done` exists. (This replaced the
   earlier per-file bulk walk.)
 - **Resources:** memory = the group's class × `MEMORY_MULTIPLIER` (1; set 2
-  for a retry launch), runtime = Σ task minutes rounded up to 10, capped at
-  360; `max_attempts = 3`, retry scaling memory ×2 / runtime ×1.5;
-  `max_concurrently_running = 2500`. Multipliers are applied after grouping,
-  so they don't change group hashes.
+  for a retry launch). At admin 1 the class is first mapped through
+  `ADMIN1_MEMORY_GB = {3: 9, 4: 9, 5: 10, 10: 12, 29: 20}`, because each
+  admin 1 group holds a ~7.3 GB baseline the 4A classes leave out. Runtime =
+  Σ task minutes × `RUNTIME_REQUEST_FRACTION` (0.75), rounded up to 10,
+  capped at 360 (a full group asks for 270 min). `max_attempts = 3`, retry
+  scaling memory ×2 / runtime ×1.5; `max_concurrently_running = 2500`.
+  Multipliers are applied after grouping, so they don't change group hashes.
+- **Resource profile (v2 admin 1, workflows 590392/590614/590669; 731 sampled
+  attempts, 2026-10-12):** peak memory 7.35 GB (3G class), 7.38 (4G), 8.90
+  (5G), 10.00 (10G), 16.94 (29G); 5-6G requests were all OOM-killed within
+  30 s, so 590392 retried 24,927 of 25,395 groups. Actual runtime / packed
+  estimate: median 0.04, p99 0.60, max 0.69 (longest group 247 min); CPU
+  efficiency ~0.99 of 1 core. With the new requests none of the 484 sampled
+  successful attempts would have OOMed or timed out. Post-processing (590669):
+  attempt 1 timed out at 4 h with MaxRSS at the 100G limit, attempt 2 resumed
+  and finished in 42 min at 71 GB; left at 40 cores / 100G / 240 min.
 - Writes the grouped list to
   `stage4a_metadata_v3_admin{N}/_workflow_grouped_tasks_4b/grouped_tasks_<uuid>.parquet`
   and adds the post-processing task downstream of every group.
