@@ -1,6 +1,6 @@
 # Claude Session Memory
 
-**Last Updated:** 2026-10-13 (stage 3 respec done)
+**Last Updated:** 2026-10-13 14:00 (stage 2 stopped: filesystem metadata storm)
 
 ## Current Task
 CLIMADA stage 1 (v3): option to re-estimate central pressure with CLIMADA's
@@ -122,6 +122,84 @@ central pressure needs replacing.
 - Memory follows basin, not estimated admin count. Launcher now uses
   _BASIN_RESOURCES per level (peak x1.15, longest x1.2); bins removed.
   Admin0 EP needs ~88G (100% OOM at 50G in v2).
+
+## Stage 2 stopped (2026-10-13 ~13:54) — filesystem metadata storm
+- Storage admins flagged 4.2M NOENT lookups from uid 701454 (zarr.json 1.54M,
+  .zgroup/.zattrs/.zmetadata ~386K each). User stopped 637740 via GUI; no
+  stage 2 jobs left in SLURM at 13:54. Do not restart until reads are fixed.
+- stage1_v2 and stage1_v3 are BOTH Zarr format 3 (not a pipeline v2/v3 issue).
+- Causes: (1) each stage 2 task reads all 100 draws of its combo, ~25 tasks
+  per combo -> each storm read ~25x, opened twice per task (metadata pass +
+  data pass); (2) no zarr_format=3 -> v2 metadata probes per open (~28%);
+  (3) 64x64 chunks + NaN fill -> ~50% of chunk files absent, probed on read.
+- Fix options: zarr_format=3 in stage 2/4A/4B opens; read storm dates from
+  group zarr.json; restructure stage 2 to read each combo once; stage 1 write
+  as single chunk or sharded. zarr.json misses (1.54M) not reproduced — ask
+  admins for sample paths.
+- v2 vs v3 stage 2 comparison: v3 PAF ~0.74x v2 (grid-fix lowers, CLIMADA
+  pressure raises except EP where it lowers). AU decomposition: grid 0.66x,
+  pressure 1.13x, net 0.74x.
+
+## Filesystem fixes, step by step (2026-10-13)
+1. DONE 33c5438 (+7d1e1ab CRLF restore): zarr_format=3 in stage 2/4A/4B opens.
+   Test (stage 2 read pass, SP draw e0, 10 storms): 358 -> 298 lookups,
+   118 -> 58 misses, format probes 60 -> 0, data identical. Test harness:
+   scratchpad zread_test.py (strace; count misses by checking paths on disk —
+   strace -f splits unfinished/resumed lines).
+2. DONE cc11a3b: storm dates from group zarr.json (stage 2/4A/4B
+   iter_storms_metadata). Full stage 2 task test (SP MRI historical 1970-1974,
+   storm_draw_0100, resp; scratchpad run_stage2_task.py writes to scratch):
+   35,471 -> 21,296 lookups, 12,558 -> 6,888 misses; rasters identical to
+   production; 125 s on 2 cores. zarr.json misses = 0 in stage 2 reads.
+3. DONE 95b41f1: main/storm_zarr.py open_storm (ChunkManifestStore lists
+   <array>/c once; absent chunks never looked up) used in stage 2/4A/4B data
+   reads; tests/test_climada_storm_zarr.py (5). Same task: lookups 18,447,
+   misses 0, dir listings 1,145 -> 5,527; rasters identical; 107 s.
+4. DONE 54c6fad: stage 2 one task per combo (3,612 tasks), resample intensity
+   once/storm (bit-identical), draws in one process (workers pickled ~360 MiB
+   per draw). Launcher defaults 1 core/4G/60 min, max 300 running, --dry_run.
+   SP combo 103 s 0.3 GB; EP 58-job combo 16 min 2.6 GB; 60/60 rasters
+   identical to production; resume test OK. Dry run: 3,612 combos.
+   bfe0f34: gdal_env sets GDAL_DATA/PROJ_DATA (rasterio searched conda env on
+   /mnt/share/code every resample: 14k lookups/9.3k misses per old task).
+5. DONE c319616 (4B): lru_cache shapefile/pop, prepare_storm_rasters caches
+   last storm, rows sorted by storm; 11/11 records identical. cc62853: GDAL env
+   in prep count generators. Stage 3 caching (lru_cache + preload before fork)
+   committed 2026-10-13 (opens 20 -> 4 per task, 5/5 parquets identical).
+6. Pilot 638451 (42 combos) clean: max 20.8 min, 2.9 GB, 4,606/4,606 outputs.
+   FULL stage 2 = workflow 638496 (3,570 combos + 2 count tasks), launched
+   2026-10-13 16:24 detached (nohup setsid), log
+   /mnt/share/homes/mfiking/climada_logs/stage2_combo_full_20261013_162430.log
+
+## Stage 2 full run 638496 result (2026-10-13 ~19:15): FAILED, 3,570 done, 2 fatal
+- Both fatal combos = damaged stage 1 INTENSITY groups (partial write, no lat,
+  2026-10-11 19:23-19:27; exposure + landfall intact):
+  EC-Earth3 r1 historical 1980-1984 WP draw 28 (_e27) storm_0136 (only 1984 missing)
+  EC-Earth3 r1 historical 1985-1988 WP draw 82 (_e81) storm_0129 (empty attrs ->
+  dates pass KeyError -> all 4 years missing).
+- Regenerated with stage 1 code + v3 run config, verified (exposure + landfall
+  identical to prod), staged in /mnt/share/homes/mfiking/climada_repair/
+  20261013_storm_{0136,0129}. USER must swap them into stage1_v3 (org rule: no
+  overwrites on shared drives by Claude). User swapped both in (verified identical).
+- Repair run: workflow 638551 (--combo x2 + 2 count tasks), launched 20:47,
+  log climada_logs/stage2_combo_repair_20261013_204730.log. 6c8c404: launcher
+  --combo + threaded completion scan (sequential full scan took hours).
+
+## Stage 2 complete (2026-10-13 21:46): repair wf 638551 done incl. both count parquets.
+
+## Stage 3 restructure (c64c1dd, 2026-10-13)
+- One task per (combo, year): process_combo_year reads/masks each 100 m population
+  window once for all storm draw x cause jobs; per-job resample remains (~95 s/job-yr
+  SP admin0; shared ~200 s). 16,968 tasks per admin level. Bit-identical: combo vs
+  per-job (SP a0 6/6, NA a1 8/8) and on v2 inputs vs saved stage3_v2(_admin1) (6/6, 8/8).
+  Pixel-lookup variant identical but slower -> dropped.
+- Launcher: --admin_level CLI, --combo, --pilot, --dry_run, threaded scan, runtime =
+  1.5 x (v2 per-job min/5) x (0.67+0.33*jobs), memory by basin, max 300 running.
+- LAUNCHED both levels 2026-10-13 22:30 detached: admin 0 = wf 638563, admin 1 = wf 638562; logs
+  climada_logs/stage3_admin{0,1}_combo_year_20261013_223051.log. User raised
+  concurrency to 450 for both in the GUI. Launchers run inside interactive SLURM
+  job 56876825 (3d17h left at 22:35) — relaunch the launcher if it dies. Expect admin 1
+  overnight; admin 0 ~30+ h at 300 concurrent (raise with jobmon workflow concurrency).
 
 ## Next Steps
 1. Stage 2 (637740) finishing -> count tasks -> launch stage 3 admin 0 and
