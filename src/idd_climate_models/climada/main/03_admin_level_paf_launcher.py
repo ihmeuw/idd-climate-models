@@ -49,9 +49,11 @@ else:
     GENERATE_SCRIPT = Path(__file__).resolve().parent.parent / "prep" / "generate_storm_draw_admin1_count.py"
     # Same, v2 admin 1 workflows 589680/589842: AU 2.2G/5m, EP 6.2G/24m,
     # NA 3.0G/16m and NI 10.0G/16m (both pinned at their 3G/10G limits),
-    # SI 1.1G/0.5m, SP 1.0G/0.4m, WP 6.0G/14m.
+    # SI 1.1G/0.5m, SP 1.0G/0.4m, WP 6.0G/14m. v3 combo-year run (wf 638562):
+    # every NA task OOMed at 4G after 12-16 min, AU peaked at 3.0G of 3G, so
+    # NA 10G and AU 4G.
     _BASIN_RESOURCES = {
-        "AU": (3, 6), "EP": (8, 29), "NA": (4, 20), "NI": (12, 20),
+        "AU": (4, 6), "EP": (8, 29), "NA": (10, 20), "NI": (12, 20),
         "SI": (2, 5), "SP": (2, 5), "WP": (7, 17),
     }
 
