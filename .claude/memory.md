@@ -198,7 +198,11 @@ central pressure needs replacing.
 - LAUNCHED both levels 2026-10-13 22:30 detached: admin 0 = wf 638563, admin 1 = wf 638562; logs
   climada_logs/stage3_admin{0,1}_combo_year_20261013_223051.log. User raised
   concurrency to 450 for both in the GUI. Launchers run inside interactive SLURM
-  job 56876825 (3d17h left at 22:35) — relaunch the launcher if it dies. Expect admin 1
+  job 56876825 (3d17h left at 22:35) — relaunch the launcher if it dies.
+- 23:10: all ~300 NA admin1 first attempts OOM at 4G (after 12-16 min); Jobmon
+  retries at 9G (scale 1.25 = +125%). AU admin1 3G borderline. 5a15b71 raises
+  NA a1 -> 10G, AU a1 -> 4G for relaunches. CHECK in the morning that NA a1
+  retries succeeded. Expect admin 1
   overnight; admin 0 ~30+ h at 300 concurrent (raise with jobmon workflow concurrency).
 
 ## Next Steps
