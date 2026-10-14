@@ -1,5 +1,6 @@
 import argparse
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 import pandas as pd  # type: ignore
 from jobmon.client.tool import Tool  # type: ignore
 from pathlib import Path
@@ -20,6 +21,9 @@ parser.add_argument("--memory_gb", type=int, default=4, help="memory per task (x
 parser.add_argument("--runtime_min", type=int, default=60, help="runtime per task (x1.5 on retry)")
 parser.add_argument("--max_concurrent", type=int, default=300,
                     help="max tasks running at once (caps the load on the shared filesystem)")
+parser.add_argument("--combo", action="append", default=[],
+                    help="only this combo, as SOURCE/VARIANT/EXPERIMENT/BATCH_YEAR/BASIN "
+                         "(repeatable); skips the completion scan of the others")
 parser.add_argument("--dry_run", action="store_true",
                     help="build the task list and print it; do not bind or submit anything")
 args = parser.parse_args()
@@ -174,8 +178,24 @@ final_long = df.melt(
 # Completion derivation (filesystem-based, not Jobmon-based): submit a combo
 # if any of its (storm draw, cause, year) rasters is missing. The worker only
 # computes the missing ones (get_year_status per job).
+if args.combo:
+    # Repair runs: check and submit only the named combos.
+    wanted = {tuple(c.split("/")) for c in args.combo}
+    bad = [c for c in wanted if len(c) != len(COMBO_COLS)]
+    if bad:
+        raise SystemExit(f"--combo must be SOURCE/VARIANT/EXPERIMENT/BATCH_YEAR/BASIN, got {bad}")
+    keys = final_long[COMBO_COLS].apply(tuple, axis=1)
+    unknown = wanted - set(keys)
+    if unknown:
+        raise SystemExit(f"--combo not in the task list: {sorted(unknown)}")
+    final_long = final_long[keys.isin(wanted)]
+
 combos = final_long.groupby(COMBO_COLS, sort=False)
-incomplete = [key for key, rows in combos if not combo_is_complete(rows)]
+# Each check is one NFS round trip (~15 ms), and a complete combo checks all
+# of its rasters (up to 290), so the full scan runs in threads.
+with ThreadPoolExecutor(max_workers=32) as pool:
+    done_flags = list(pool.map(lambda kv: combo_is_complete(kv[1]), combos))
+incomplete = [key for (key, _), done in zip(combos, done_flags) if not done]
 remaining = pd.DataFrame(incomplete, columns=COMBO_COLS)
 print(f"Completion scan: {combos.ngroups - len(remaining)} / {combos.ngroups} combos "
       f"already done on disk; {len(remaining)} combos to submit.")

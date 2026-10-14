@@ -849,8 +849,11 @@ Inside a task:
 ### Launcher
 
 - One task per combo with any missing GeoTIFF (`combo_is_complete` stops at
-  the first missing file). `--dry_run` builds and prints the task list without
-  binding.
+  the first missing file; 32 threads, since each check is one ~15 ms NFS round
+  trip and a complete combo checks up to 290 rasters). `--combo
+  SOURCE/VARIANT/EXPERIMENT/BATCH_YEAR/BASIN` (repeatable) checks and submits
+  only those combos, for repairs. `--dry_run` builds and prints the task list
+  without binding.
 - Resources (2026-10-13): `--cores 1` (one worker: with more, each draw's
   per-job sums — up to ~360 MiB for a 58-job EP combo — are pickled back to
   the parent, which was far slower), `--memory_gb 4`, `--runtime_min 60`,
