@@ -23,6 +23,9 @@ import sys
 # rasterio searches for them on every raster open (see main/gdal_env.py).
 os.environ.setdefault("GDAL_DATA", os.path.join(sys.prefix, "share", "gdal"))
 os.environ.setdefault("PROJ_DATA", os.path.join(sys.prefix, "share", "proj"))
+# No sidecar-file probing on raster opens, no plugin-driver search (see main/gdal_env.py).
+os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+os.environ.setdefault("GDAL_DRIVER_PATH", "disable")
 
 from pathlib import Path
 from typing import Any
