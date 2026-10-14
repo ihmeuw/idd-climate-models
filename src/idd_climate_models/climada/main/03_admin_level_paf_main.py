@@ -25,32 +25,20 @@ from shapely.ops import split, unary_union  # type: ignore
 import pyarrow.parquet as pq  # type: ignore
 from rasterra import RasterArray  # type: ignore
 
-parser = argparse.ArgumentParser(description="Run CLIMADA code")
-
-# Define arguments
-parser.add_argument("--storm_draw", type=str, required=True, help="Storm Draw")
+parser = argparse.ArgumentParser(
+    description="CLIMADA stage 3: per-admin PAF parquets for every storm draw x cause of one combo"
+)
 parser.add_argument("--source_id", type=str, required=True, help="Source Id")
 parser.add_argument("--variant_label", type=str, required=True, help="Variant Label")
 parser.add_argument("--experiment_id", type=str, required=True, help="Experiment Id")
 parser.add_argument("--batch_year", type=str, required=True, help="Batch Year")
 parser.add_argument("--basin", type=str, required=True, help="Basin")
-parser.add_argument("--relative_risk", type=str, required=True, help="Relative risk type")
-parser.add_argument("--sample_name", type=str, required=True, help="Sample name for relative risk")
-parser.add_argument("--num_cores", type=int, required=True, help="Number of cores to use for parallel processing")
+parser.add_argument("--year", type=int, default=None, help="Only this year of batch_year (default: all)")
+parser.add_argument("--num_cores", type=int, required=True, help="Years processed in parallel")
 parser.add_argument("--admin_level", type=int, required=False, default=0, choices=[0, 1], help="Admin level (0 or 1)")
 
-
-# Parse arguments
+# Parse arguments (module level: the admin level sets the paths below)
 args = parser.parse_args()
-storm_draw = args.storm_draw
-source_id = args.source_id
-variant_label = args.variant_label
-experiment_id = args.experiment_id
-batch_year = args.batch_year
-basin = args.basin
-relative_risk = args.relative_risk
-sample_name = args.sample_name
-num_cores = args.num_cores
 admin_level = args.admin_level
 
 
@@ -58,6 +46,9 @@ admin_level = args.admin_level
 PAF_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage2_v3/")
 GRIDED_POP_PATH = Path("/mnt/team/rapidresponse/pub/population-model/results/2026_05_16/")
 POP_TOTALS_PATH = Path("/mnt/team/rapidresponse/pub/tropical-storms/fhs_population_2023_all_years.parquet")
+STORM_DRAW_TABLE_PATH = Path("/mnt/team/rapidresponse/pub/tropical-storms/storm_draw_table.csv")
+# Causes in storm_draw_table.csv; each storm draw has one RR sample per cause.
+RELATIVE_RISKS = ["indirect_resp_draw", "indirect_cvd_draw"]
 ANTIMERIDIAN = LineString([(180, -90), (180, 90)])
 
 _SHP_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/data/global_shapefile")
@@ -584,172 +575,171 @@ def split_antimeridian_geom(geom_cea):
 ##########################################
 #            MAIN FUNCTION               #
 ##########################################
-def process_single_year(args) -> list:
+def process_combo_year(
+    source_id: str,
+    variant_label: str,
+    experiment_id: str,
+    batch_year: str,
+    basin: str,
+    year: int,
+    jobs: list[tuple[str, str, str]],
+    paf_root: Path = PAF_ROOT,
+    save_root: Path = SAVE_ROOT,
+) -> dict[tuple[str, str, str], list]:
     """
-    Compute and save one year's per-admin PAF parquet. Returns the location
-    ids of admins that raised; if any did, the year is NOT saved (a parquet
-    missing those admins would read as "no exposure" downstream) so the
-    year stays incomplete and is recomputed on retry.
+    Per-admin PAF for every job (storm_draw, relative_risk, sample_name) of one
+    combo-year, reading each population window once.
+
+    All jobs of a combo come from the same Stage 1 storms and differ only in
+    the RR sample, so their admin pieces mostly need the same 100 m population
+    window. Each job's PAF steps are unchanged; pieces that need an identical
+    window (same year, bounds and piece geometry) share one read + mask, and
+    each admin's piece sums are added in the original piece order.
+
+    Returns {job: failed admin ids}; a job with failures is not saved.
     """
-    (
-        storm_draw,
-        source_id,
-        variant_label,
-        experiment_id,
-        batch_year,
-        year,
-        basin,
-        relative_risk,
-        sample_name,
-    ) = args
-
-    # ---- skip if already complete ----
-    if check_if_year_complete(
-        storm_draw,
-        source_id,
-        variant_label,
-        sample_name,
-        relative_risk,
-        experiment_id,
-        batch_year,
-        year,
-        basin,
-    ):
-        print(f"Skipping year {year} (already complete)")
-        return []
-
-    # load shapefile and population once per year
     if basin == "NA":
         shapefile = load_shapefiles_normalized()
     else:
         shapefile = load_shapefiles()
     pop_df = load_population_dataframe()
-    paf_records = []
 
-    # load and clean PAF raster once
-    raw_paf_raster = clean_paf_raster(
-        load_raw_paf_raster(
-            storm_draw=storm_draw,
-            source_id=source_id,
-            variant_label=variant_label,
-            sample_name=sample_name,
-            relative_risk=relative_risk,
-            experiment_id=experiment_id,
-            batch_year=batch_year,
-            basin=basin,
-            year=year,
+    failed: dict[tuple[str, str, str], list] = {job: [] for job in jobs}
+    # (job, admin_id) -> [(numerator, exposed) per piece, in piece order]; None = piece skipped
+    contribs: dict = {}
+    admins_by_job: dict = {}
+    # population window key -> [(job, admin_id, piece_index, paf_piece)]
+    by_window: dict = {}
+
+    # ---- per job: PAF raster, intersecting admins, pieces ----
+    for job in jobs:
+        storm_draw, relative_risk, sample_name = job
+        raw_paf_raster = clean_paf_raster(
+            load_raw_paf_raster(
+                storm_draw=storm_draw,
+                source_id=source_id,
+                variant_label=variant_label,
+                sample_name=sample_name,
+                relative_risk=relative_risk,
+                experiment_id=experiment_id,
+                batch_year=batch_year,
+                basin=basin,
+                year=year,
+                paf_root=paf_root,
+            )
         )
-    )
+        intersected_shapes = intersect_shapefile_with_raster(shapefile, raw_paf_raster, buffer_degrees=0.0)
 
+        if len(intersected_shapes) == 0:
+            marker = _no_intersection_marker_path(_year_paf_path(
+                storm_draw, source_id, variant_label, sample_name, relative_risk,
+                experiment_id, batch_year, year, basin, save_root,
+            ))
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+            admins_by_job[job] = None
+            continue
 
-    intersected_shapes = intersect_shapefile_with_raster(
-        shapefile,
-        raw_paf_raster,
-        buffer_degrees=0.0,
-    )
+        intersected_shapes = reproject_shapefile_to_equal_area(intersected_shapes)
+        admins_by_job[job] = []
 
-    if len(intersected_shapes) == 0:
-        print(f"No intersected shapes for year {year}, basin {basin}; writing no-intersection marker.")
-        marker = _no_intersection_marker_path(_year_paf_path(
-            storm_draw, source_id, variant_label, sample_name, relative_risk,
-            experiment_id, batch_year, year, basin,
-        ))
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.touch()
-        del raw_paf_raster, pop_df, shapefile
-        return []
+        for admin_shape in intersected_shapes.itertuples(index=False):
+            admin_id = getattr(admin_shape, "loc_id", None)
+            admins_by_job[job].append(admin_id)
+            try:
+                admin_geom = admin_shape.geometry
+                geom_pieces_cea, geom_pieces_wgs84 = split_antimeridian_geom(admin_geom)
+                if not geom_pieces_cea:
+                    geom_pieces_cea = [admin_geom]
+                    geom_pieces_wgs84 = [gpd.GeoSeries([admin_geom], crs="ESRI:54034").to_crs("EPSG:4326").iloc[0]]
 
-    # Reproject once
-    intersected_shapes = reproject_shapefile_to_equal_area(intersected_shapes)
+                contribs[(job, admin_id)] = [None] * len(geom_pieces_cea)
+                for k, (piece_cea, piece_wgs84) in enumerate(zip(geom_pieces_cea, geom_pieces_wgs84)):
+                    if basin != "NA":
+                        piece_wgs84 = normalize_geom_to_0_360(piece_wgs84)
 
-    print(f"Processing year {year} with {len(intersected_shapes)} intersected shapes")
+                    paf_piece = raw_paf_raster.clip(piece_wgs84).mask(piece_wgs84, all_touched=True)
+                    paf_piece = subset_affected_area(paf_piece)
 
-    failed_admins = []
-    for admin_shape in intersected_shapes.itertuples(index=False):
+                    minx, maxx, miny, maxy = paf_piece.bounds
+                    buffer = 0.2
+                    raster_bounds = box(minx - buffer, miny - buffer, maxx + buffer, maxy + buffer)
+                    intersection = piece_wgs84.intersection(raster_bounds)
+                    intersection_gdf = gpd.GeoDataFrame(geometry=[to_pm180(intersection)], crs="EPSG:4326")
+                    intersection_cea_bounds = intersection_gdf.to_crs("ESRI:54034").iloc[0].geometry.bounds
 
-        admin_id = getattr(admin_shape, "loc_id", None)
+                    key = (intersection_cea_bounds, piece_cea.wkb)
+                    by_window.setdefault(key, []).append((job, admin_id, k, paf_piece, piece_cea))
+            except Exception as e:
+                print(f"❌ Admin {admin_id} failed in year {year} ({storm_draw}/{source_id}/"
+                      f"{variant_label}/{experiment_id}/{batch_year}/{basin}): {type(e).__name__}: {e}")
+                traceback.print_exc()
+                failed[job].append(admin_id)
+        del raw_paf_raster, intersected_shapes
+
+    # ---- per population window: read + mask once, then every job's PAF piece ----
+    for (intersection_cea_bounds, _), items in by_window.items():
+        piece_cea = items[0][4]
         try:
-            admin_geom = admin_shape.geometry
+            pop_piece = load_in_gridded_population(year, 100, bounds=intersection_cea_bounds)
+            try:
+                pop_piece_masked = pop_piece.mask(piece_cea, all_touched=True)
+                del pop_piece
+            except WindowError:
+                print("[INFO] Admin piece does not intersect raster → skipping piece")
+                continue  # contributions stay None: the piece is skipped
+            pop_arr = pop_piece_masked._ndarray.astype(np.float32, copy=False)
+        except Exception as e:
+            for job, admin_id, *_ in items:
+                print(f"❌ Admin {admin_id} failed in year {year} ({job[0]}/{source_id}/{variant_label}/"
+                      f"{experiment_id}/{batch_year}/{basin}): {type(e).__name__}: {e}")
+                failed[job].append(admin_id)
+            traceback.print_exc()
+            continue
 
-            # split if crossing antimeridian
-            geom_pieces_cea, geom_pieces_wgs84 = split_antimeridian_geom(admin_geom)
-            if not geom_pieces_cea:
-                geom_pieces_cea = [admin_geom]
-                geom_pieces_wgs84 = [gpd.GeoSeries([admin_geom], crs="ESRI:54034").to_crs("EPSG:4326").iloc[0]]
-
-            print(f"Split into {len(geom_pieces_cea)} pieces after antimeridian check")
-
-            numerator_total = 0.0
-            population_exposed_total = 0.0
-
-            for piece_cea, piece_wgs84 in zip(geom_pieces_cea, geom_pieces_wgs84):
-                # use precomputed WGS84 piece
-                if basin != "NA":
-                    piece_wgs84 = normalize_geom_to_0_360(piece_wgs84)
-
-                paf_piece = raw_paf_raster.clip(piece_wgs84).mask(piece_wgs84, all_touched=True)
-                paf_piece = subset_affected_area(paf_piece)
-
-                # take the intersection of piece_wgs84 with the raster bounds
-                minx, maxx, miny, maxy = paf_piece.bounds
-                buffer = 0.2
-                minx -= buffer
-                maxx += buffer
-                miny -= buffer
-                maxy += buffer
-                raster_bounds = box(minx, miny, maxx, maxy)
-
-                # Intersect and clip
-                intersection = piece_wgs84.intersection(raster_bounds)
-                intersection_gdf = gpd.GeoDataFrame(geometry=[to_pm180(intersection)], crs="EPSG:4326")
-                intersection_cea = intersection_gdf.to_crs("ESRI:54034").iloc[0].geometry
-                intersection_cea_bounds = intersection_cea.bounds
-
-                # ----------------------------
-                # Load population (bounded)
-                # ----------------------------
-                pop_piece = load_in_gridded_population(year, 100, bounds=intersection_cea_bounds)
-
-                try:
-                    pop_piece_masked = pop_piece.mask(piece_cea, all_touched=True)
-                    del pop_piece
-                except WindowError:
-                    print("[INFO] Admin piece does not intersect raster → skipping piece")
-                    continue
-
-                # Extract arrays
-                pop_arr = pop_piece_masked._ndarray.astype(np.float32, copy=False)
-
-                # --- resample PAF to masked grid ---
+        for job, admin_id, k, paf_piece, _ in items:
+            try:
                 paf_arr = (
                     paf_piece
                     .resample_to(pop_piece_masked, resampling="nearest")
                     ._ndarray.astype(np.float32, copy=False)
                 )
-
-                del paf_piece, pop_piece_masked
-
-                # ----------------------------
-                # Valid cells
-                # ----------------------------
                 valid_mask = (pop_arr > 0) & np.isfinite(pop_arr) & (paf_arr > 0) & np.isfinite(paf_arr)
-
                 if valid_mask.any():
-                    numerator_total += (pop_arr[valid_mask] * paf_arr[valid_mask]).sum()
-                    population_exposed_total += pop_arr[valid_mask].sum()
+                    contribs[(job, admin_id)][k] = (
+                        (pop_arr[valid_mask] * paf_arr[valid_mask]).sum(),
+                        pop_arr[valid_mask].sum(),
+                    )
+                else:
+                    contribs[(job, admin_id)][k] = (0, 0)
+                del paf_arr, valid_mask
+            except Exception as e:
+                print(f"❌ Admin {admin_id} failed in year {year} ({job[0]}/{source_id}/{variant_label}/"
+                      f"{experiment_id}/{batch_year}/{basin}): {type(e).__name__}: {e}")
+                traceback.print_exc()
+                failed[job].append(admin_id)
+        del pop_piece_masked, pop_arr
 
-                # clean arrays
-                del pop_arr, paf_arr, valid_mask
+    # ---- per job: records and save ----
+    for job in jobs:
+        storm_draw, relative_risk, sample_name = job
+        admins = admins_by_job.get(job)
+        if admins is None:
+            continue  # no-intersection marker written
+        if failed[job]:
+            print(f"❌ Year {year} {job}: {len(failed[job])} admin(s) failed {failed[job]}; not saving the year.")
+            continue
 
-            # ----------------------------
-            # Population denominator
-            # ----------------------------
-            pop_sum, special_region_flag = get_population_total(
-                pop_df=pop_df,
-                year=year,
-                admin_id=admin_id,
-            )
+        paf_records = []
+        for admin_id in admins:
+            numerator_total = 0.0
+            population_exposed_total = 0.0
+            for piece in contribs[(job, admin_id)]:
+                if piece is not None and piece != (0, 0):
+                    numerator_total += piece[0]
+                    population_exposed_total += piece[1]
 
+            pop_sum, special_region_flag = get_population_total(pop_df=pop_df, year=year, admin_id=admin_id)
             if pop_sum == 0:
                 weighted_paf = 0.0
                 population_exposed = 0.0
@@ -768,83 +758,70 @@ def process_single_year(args) -> list:
                 "special_region_flag": special_region_flag,
             })
 
-            # explicitly clean per admin
-            del numerator_total, population_exposed_total, geom_pieces_cea, geom_pieces_wgs84, admin_geom
-        except Exception as e:
-            print(
-                f"❌ Admin {admin_id} failed in year {year} "
-                f"({storm_draw}/{source_id}/{variant_label}/{experiment_id}/"
-                f"{batch_year}/{basin}): {type(e).__name__}: {e}"
-            )
-            traceback.print_exc()
-            failed_admins.append(admin_id)
-            continue
-
-    # ----------------------------
-    # Final cleanup
-    # ----------------------------
-    del raw_paf_raster, intersected_shapes, shapefile, pop_df
-
-    if failed_admins:
-        print(
-            f"❌ Year {year}: {len(failed_admins)} admin(s) failed {failed_admins}; "
-            f"not saving the year."
+        final_paf_df = (
+            pd.DataFrame.from_records(paf_records)
+            .sort_values(["storm_draw", "location_id", "year"])
+            .reset_index(drop=True)
         )
-        return failed_admins
+        save_batch_paf_dataframe(
+            final_paf_df, storm_draw, source_id, variant_label, sample_name, relative_risk,
+            experiment_id, batch_year, year, basin, save_root,
+        )
 
-    final_paf_df = (
-        pd.DataFrame.from_records(paf_records)
-        .sort_values(["storm_draw", "location_id", "year"])
-        .reset_index(drop=True)
-    )
+    return failed
 
-    save_batch_paf_dataframe(
-        final_paf_df,
-        storm_draw,
-        source_id,
-        variant_label,
-        sample_name,
-        relative_risk,
-        experiment_id,
-        batch_year,
-        year,
-        basin,
-    )
 
-    del paf_records, final_paf_df
-    return []
+def combo_jobs(source_id: str, variant_label: str) -> list[tuple[str, str, str]]:
+    """(storm_draw, relative_risk, sample_name) for every storm draw x cause of
+    (source_id, variant_label), from storm_draw_table.csv."""
+    table = pd.read_csv(STORM_DRAW_TABLE_PATH)
+    table = table[(table["source_id"] == source_id) & (table["variant_label"] == variant_label)]
+    return [
+        (f"storm_draw_{row.storm_draw:04d}", relative_risk, getattr(row, relative_risk))
+        for row in table.sort_values("storm_draw").itertuples(index=False)
+        for relative_risk in RELATIVE_RISKS
+    ]
+
+
+def _run_combo_year(args) -> dict:
+    return process_combo_year(*args)
+
 
 def main(
-    storm_draw: str,
     source_id: str,
     variant_label: str,
     experiment_id: str,
     batch_year: str,
     basin: str,
-    relative_risk: str,
-    sample_name: str,
     num_cores: int,
+    year: int | None = None,
     save_root: Path = SAVE_ROOT,
 ):
-    start_year, end_year = batch_year.split("-")
-    start_year = int(start_year)
-    end_year = int(end_year)
+    """Write the per-admin PAF parquets of every storm draw x cause of one combo
+    (or one year of it), for the (job, year) pairs not yet complete."""
+    jobs = combo_jobs(source_id, variant_label)
+    start_year, end_year = map(int, batch_year.split("-"))
 
-    years = list(range(start_year, end_year + 1))
-    year_args = [
-        (
-            storm_draw,
-            source_id,
-            variant_label,
-            experiment_id,
-            batch_year,
-            year,
-            basin,
-            relative_risk,
-            sample_name,
-        )
-        for year in years
-    ]
+    years = [year] if year is not None else list(range(start_year, end_year + 1))
+    if year is not None and not start_year <= year <= end_year:
+        raise SystemExit(f"--year {year} is outside batch_year {batch_year}")
+
+    year_args = []
+    for year in years:
+        missing = [
+            job for job in jobs
+            if not check_if_year_complete(
+                job[0], source_id, variant_label, job[2], job[1],
+                experiment_id, batch_year, year, basin, save_root,
+            )
+        ]
+        if missing:
+            year_args.append((source_id, variant_label, experiment_id, batch_year, basin,
+                              year, missing, PAF_ROOT, save_root))
+    if not year_args:
+        print(f"✅ All outputs exist for {source_id}/{variant_label}/{experiment_id}/{batch_year}/{basin}.")
+        return
+    print(f"{len(jobs)} job(s); years to compute: {[(a[5], len(a[6])) for a in year_args]} (year, jobs)")
 
     # Read the admin shapes and population totals once here, before the
     # per-year workers fork; each worker then reuses the cached copies.
@@ -854,30 +831,27 @@ def main(
         load_shapefiles()
     load_population_dataframe()
 
-    failed_by_year = run_parallel(
-        runner=process_single_year,
-        arg_list=year_args,
-        num_cores=num_cores,   # tune based on memory
-        progress_bar=True,
-    )
-    print(f"parallel tasks done")
+    results = run_parallel(runner=_run_combo_year, arg_list=year_args, num_cores=num_cores)
 
-    incomplete = {y: f for y, f in zip(years, failed_by_year) if f}
-    if incomplete:
-        # Non-zero exit so Jobmon retries (max_attempts / resource scaling are
-        # set in the launcher); the retry recomputes only the unsaved years.
-        print(f"❌ {len(incomplete)} year(s) not saved; failed admins by year: {incomplete}")
+    failed = {
+        (args_[5], job): admins
+        for args_, result in zip(year_args, results)
+        for job, admins in result.items() if admins
+    }
+    if failed:
+        # Non-zero exit so Jobmon retries; the retry recomputes only the
+        # unsaved (job, year) pairs.
+        print(f"❌ {len(failed)} (year, job) pair(s) not saved; failed admins: {dict(list(failed.items())[:20])}")
         raise SystemExit(1)
+    print(f"Completed {len(jobs)} job(s) for {source_id}/{variant_label}/{experiment_id}/{batch_year}/{basin}")
 
 
 main(
-    storm_draw=storm_draw,
-    source_id=source_id,
-    variant_label=variant_label,
-    experiment_id=experiment_id,
-    batch_year=batch_year,
-    basin=basin,
-    relative_risk=relative_risk,
-    sample_name=sample_name,
-    num_cores=num_cores,
+    source_id=args.source_id,
+    variant_label=args.variant_label,
+    experiment_id=args.experiment_id,
+    batch_year=args.batch_year,
+    basin=args.basin,
+    num_cores=args.num_cores,
+    year=args.year,
 )

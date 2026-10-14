@@ -1088,21 +1088,45 @@ Provenance) and need re-running after Stages 1–2.
 
 ### Runtime scope
 
-Same 8-tuple per invocation as stage 2:
-`(storm_draw, source_id, variant_label, experiment_id, batch_year, basin,
-relative_risk, sample_name)`, plus `--admin_level`. Inside:
+One task per **(combo, year)** (changed 2026-10-13; before, one task per
+`(storm draw, cause)` covering all years): `--source_id --variant_label
+--experiment_id --batch_year --basin --year --admin_level`. The task computes
+every **job** (storm draw × cause) of the combo that is still missing that
+year — 2–58 jobs, the same jobs as stage 2's combo tasks.
 
-- One year in `batch_year` per parallel worker via `run_parallel`, batched by
-  `num_cores` (the launcher passes 1, so years run sequentially).
-- Each worker computes population-weighted PAF for every admin polygon that
-  intersects the basin's RR > 0 area for that year.
+All jobs of a combo come from the same Stage 1 storms and differ only in the
+RR sample, so their admin pieces mostly need the same 100 m population window.
+`process_combo_year` does each job's PAF steps unchanged (load + clean its
+PAF raster, intersect admins, split pieces, clip/mask/subset the PAF piece),
+groups the pieces that need an identical population window (same CEA bounds
+and piece geometry), reads and masks each window once, then resamples each
+job's PAF piece to it. Each admin's piece sums are added in the original
+piece order.
+
+Profile (SP admin 0, MRI-ESM2-0 r4 historical 1970–1974, 1972, 6 jobs): 780 s
+per combo-year — ~200 s shared population work (window reads 41 s, masking
+~150 s) + ~95 s per job (resample to 100 m 46 s, clip/mask). The same 6 jobs
+as per-job tasks: ~390 s each. A pixel-lookup variant (resample a cell-index
+raster once per window, index per job) was bit-identical but slower, so it is
+not used.
+
+**Verification (2026-10-13), all bit-identical:**
+
+| Test | Files |
+|---|---|
+| combo code vs per-job code, v3 inputs, SP admin 0 1972 | 6/6 |
+| combo code vs per-job code, v3 inputs, NA admin 1 2045 (MRI r3 ssp585 2044–2048) | 8/8 |
+| combo code on **v2** stage 2 rasters vs saved `stage3_v2` parquets, SP admin 0 | 6/6 |
+| same vs saved `stage3_v2_admin1`, NA admin 1 | 8/8 |
+
+v3 vs v2 for those jobs: same admins except a few at the footprint edge,
+identical populations; PAF 1.13–1.14× (SP) and 0.84–0.89× (NA), in line with
+the stage 2 ratios.
 
 ### Admin level
 
-`ADMIN_LEVEL` in the launcher (currently **0**) selects the metadata parquet,
-output root and resource table, and is passed to the worker as
-`--admin_level`. Both levels are run for the full pipeline: launch once with
-`ADMIN_LEVEL = 0` and once with `ADMIN_LEVEL = 1`.
+`--admin_level` (launcher and worker) selects the count parquet, output root,
+shapefile and resource table. Launch once per level.
 
 | | Admin 0 | Admin 1 |
 |---|---|---|
@@ -1111,23 +1135,37 @@ output root and resource table, and is passed to the worker as
 | Shapefile, non-NA basins | `global_WGS84_admin0.parquet` (0–360) | `global_WGS84_admin1_0_360.parquet` (0–360) |
 | Shapefile, NA basin | `global_WGS84_admin0_normalized.parquet` (−180..180) | `global_WGS84_admin1_0_360.parquet`, normalized to −180..180 at load |
 
+### Launcher
+
+`python 03_admin_level_paf_launcher.py --admin_level <0|1>` with `--dry_run`,
+`--combo SRC/VAR/EXP/BATCH/BASIN` (repeatable), `--pilot N`, `--cores`
+(years in parallel; 1), `--max_concurrent` (300), `--runtime_factor` (1.5).
+The combo list comes from the count parquet (the launcher exits if it is
+missing instead of running the 64-core generator itself). Completion is
+checked per (combo, year) in 32 threads: every job needs a parquet ≥ 1 KB or a
+`.no_intersection` marker. 16,968 (combo, year) tasks per level.
+
+Resources: memory by basin (`_BASIN_RESOURCES`; a task holds one population
+window at a time, as a per-job task did). Runtime = factor × (v2 per-job
+runtime / 5) × (0.67 + 0.33 × jobs), min 10 min: admin 0 10–390 min, admin 1
+10–170 min. Retries ×1.25 memory, ×1.75 runtime, `max_attempts = 5`.
+
 ### CLI
 
 ```
 python 03_admin_level_paf_main.py \
-  --storm_draw <storm_draw_NNNN> \
   --source_id <str> \
   --variant_label <str> \
   --experiment_id <str> \
   --batch_year <YYYY-YYYY> \
   --basin <EP|NA|NI|SI|AU|SP|WP> \
-  --relative_risk <indirect_resp_draw|indirect_cvd_draw> \
-  --sample_name <str> \
+  [--year <YYYY>]            # default: every year of batch_year
   --num_cores <int> \
   --admin_level <0|1>        # default 0
 ```
 
-Exit code is **1** if any admin failed in any year (see Resume semantics).
+Exit code is **1** if any admin failed for any (year, job); that job-year is
+not saved and the retry recomputes it.
 
 ### Inputs
 
@@ -1189,6 +1227,8 @@ This is expected, not a bug.
 | Equal-area CRS | `ESRI:54034` | Cylindrical equal area; matches the gridded population's projection |
 
 ### Pipeline flow
+
+(Per job-year steps; since 2026-10-13 they run inside `process_combo_year`, see Runtime scope.)
 
 Per-invocation (`main`):
 1. Enumerate years from `batch_year` (inclusive on both ends).

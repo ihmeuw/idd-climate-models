@@ -1,18 +1,29 @@
-import subprocess
-import sys
+import argparse
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 import pandas as pd  # type: ignore
 from jobmon.client.tool import Tool  # type: ignore
 from pathlib import Path
 
+parser = argparse.ArgumentParser(description="Launch CLIMADA stage 3 (one task per combo)")
+parser.add_argument("--admin_level", type=int, required=True, choices=[0, 1])
+parser.add_argument("--pilot", type=int, default=0,
+                    help="submit only ~N combos, spread over basins and models, to check resources")
+parser.add_argument("--combo", action="append", default=[],
+                    help="only this combo, as SOURCE/VARIANT/EXPERIMENT/BATCH_YEAR/BASIN (repeatable)")
+parser.add_argument("--cores", type=int, default=1, help="SLURM cores per task = years run in parallel")
+parser.add_argument("--runtime_factor", type=float, default=1.5,
+                    help="safety factor on the estimated (combo, year) runtime (x1.75 on retry)")
+parser.add_argument("--max_concurrent", type=int, default=300,
+                    help="max tasks running at once (caps the load on the shared filesystem)")
+parser.add_argument("--dry_run", action="store_true",
+                    help="build the task list and print it; do not bind or submit anything")
+args = parser.parse_args()
+ADMIN_LEVEL = args.admin_level
+
 RELATIVE_RISKS = ["indirect_resp_draw", "indirect_cvd_draw"]
 
 STORM_DRAW_TABLE_PATH = Path("/mnt/team/rapidresponse/pub/tropical-storms/storm_draw_table.csv")
-
-# ── Admin level ───────────────────────────────────────────────────────────────
-# Set to 0 or 1. Controls which metadata parquet, shapefile, and output root
-# are used. All other launcher logic is identical across levels.
-ADMIN_LEVEL = 0
 
 if ADMIN_LEVEL == 0:
     SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage3_v3_admin0/")
@@ -20,28 +31,22 @@ if ADMIN_LEVEL == 0:
         "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin0_count_v3.parquet"
     )
     GENERATE_SCRIPT = Path(__file__).resolve().parent.parent / "prep" / "generate_storm_draw_admin0_count.py"
-    METRIC_COLS = [
-        "n_storms_in_batch", "estimated_storms_per_year", "year",
-        "num_admin0_first_year", "num_years_in_batch", "estimated_admin0_total",
-    ]
-    # basin: (memory GB, runtime min). v2 admin 0 peak memory / longest task
+    # basin: (memory GB, per-job runtime min). v2 admin 0 peak memory / longest task
     # (runtime summed over attempts), workflows 584230/584480/584688:
     # AU 37.4G/46m, EP 87.8G/54m (every sampled EP task OOMed at 50G), NA 46.0G/49m,
-    # NI 16.5G/33m, SI 23.6G/22m, SP 32.4G/19m, WP 28.3G/44m.
+    # NI 16.5G/33m, SI 23.6G/22m, SP 32.4G/19m, WP 28.3G/44m. Memory is set by the
+    # largest 100 m population window, which a combo task holds one at a time,
+    # as a per-job task did.
     _BASIN_RESOURCES = {
         "AU": (43, 55), "EP": (101, 65), "NA": (53, 60), "NI": (19, 40),
         "SI": (28, 30), "SP": (38, 25), "WP": (33, 55),
     }
-elif ADMIN_LEVEL == 1:
+else:
     SAVE_ROOT = Path("/mnt/team/rapidresponse/pub/tropical-storms/climada/output/stage3_v3_admin1/")
     META_PARQUET = Path(
         "/mnt/team/rapidresponse/pub/tropical-storms/climada/output/storm_draw_admin1_count_v3.parquet"
     )
     GENERATE_SCRIPT = Path(__file__).resolve().parent.parent / "prep" / "generate_storm_draw_admin1_count.py"
-    METRIC_COLS = [
-        "n_storms_in_batch", "estimated_storms_per_year", "year",
-        "num_admin1_first_year", "num_years_in_batch", "estimated_admin1_total",
-    ]
     # Same, v2 admin 1 workflows 589680/589842: AU 2.2G/5m, EP 6.2G/24m,
     # NA 3.0G/16m and NI 10.0G/16m (both pinned at their 3G/10G limits),
     # SI 1.1G/0.5m, SP 1.0G/0.4m, WP 6.0G/14m.
@@ -49,15 +54,16 @@ elif ADMIN_LEVEL == 1:
         "AU": (3, 6), "EP": (8, 29), "NA": (4, 20), "NI": (12, 20),
         "SI": (2, 5), "SP": (2, 5), "WP": (7, 17),
     }
-else:
-    raise ValueError(f"ADMIN_LEVEL must be 0 or 1, got {ADMIN_LEVEL!r}")
 
 UNIQUE_KEYS = ["source_id", "variant_label", "experiment_id", "batch_year", "basin"]
 
 if not META_PARQUET.exists():
-    print(f"Metadata parquet not found at {META_PARQUET}. Running generation script...")
-    subprocess.run([sys.executable, str(GENERATE_SCRIPT)], check=True)
-    print("Generation complete.")
+    # The generator runs on 64 cores; it normally runs as the downstream task of
+    # the stage 2 workflow. Don't start it from wherever this launcher runs.
+    raise SystemExit(
+        f"Count parquet not found: {META_PARQUET}. It is written by the stage 2 workflow's "
+        f"count task ({GENERATE_SCRIPT.name}); run that first."
+    )
 
 
 def _stage3_paf_path(
@@ -86,24 +92,21 @@ def _stage3_paf_path(
     )
 
 
-def task_is_complete(row) -> bool:
-    """A stage-3 task is complete iff every year in its batch_year has a
-    paf parquet on disk that's at least 1 KB, or a .no_intersection marker.
-    Mirrors the existence + size check in `check_if_year_complete`; skips
-    the parquet header validity
-    test (the main script's resume logic will catch and rebuild invalid
-    files at runtime)."""
-    start_year, end_year = map(int, row["batch_year"].split("-"))
-    for year in range(start_year, end_year + 1):
+def combo_year_is_complete(rows: pd.DataFrame, year: int) -> bool:
+    """A (combo, year) is complete iff every (storm draw, cause) row has a PAF
+    parquet of at least 1 KB or a .no_intersection marker for that year. Stops
+    at the first missing file. Skips the parquet validity check (the main
+    script's resume logic catches and rebuilds invalid files)."""
+    for row in rows.itertuples(index=False):
         path = _stage3_paf_path(
-            storm_draw=row["storm_draw"],
-            source_id=row["source_id"],
-            variant_label=row["variant_label"],
-            experiment_id=row["experiment_id"],
-            batch_year=row["batch_year"],
-            basin=row["basin"],
-            relative_risk=row["relative_risk"],
-            sample_name=row["sample_name"],
+            storm_draw=row.storm_draw,
+            source_id=row.source_id,
+            variant_label=row.variant_label,
+            experiment_id=row.experiment_id,
+            batch_year=row.batch_year,
+            basin=row.basin,
+            relative_risk=row.relative_risk,
+            sample_name=row.sample_name,
             year=year,
         )
         if path.with_suffix(".no_intersection").exists():
@@ -113,142 +116,75 @@ def task_is_complete(row) -> bool:
     return True
 
 
-# Resources are set per basin: in v2 profiling the basin, not the estimated
-# admin count, decided memory (the old heavy/light bins on the estimated total
-# asked 50G for every admin 0 task). _BASIN_RESOURCES ~ v2 peak memory x1.15
-# and longest task x1.2; retries scale memory x1.25 / runtime x1.75, and a
-# retry skips years already written.
-DEFAULT_NUM_CORES = 1
+# One task per (combo, year), combo = (source_id, variant_label, experiment_id,
+# batch_year, basin): it reads each 100 m population window once for all
+# storm draw x cause jobs of the combo (they share the stage 1 storms), instead
+# of once per job. Before 2026-10-13 there was one task per (storm draw, cause)
+# covering all years.
+combos_df = pd.read_parquet(META_PARQUET)[UNIQUE_KEYS].drop_duplicates()
+storm_draw_df = pd.read_csv(STORM_DRAW_TABLE_PATH)
+storm_draw_df["storm_draw"] = storm_draw_df["storm_draw"].apply(lambda x: f"storm_draw_{x:04d}")
+final_long = (
+    storm_draw_df
+    .merge(combos_df, on=["source_id", "variant_label"], how="inner")
+    .melt(id_vars=UNIQUE_KEYS + ["storm_draw"], value_vars=RELATIVE_RISKS,
+          var_name="relative_risk", value_name="sample_name")
+)
 
-
-def assign_resources(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    unknown = set(df["basin"]) - set(_BASIN_RESOURCES)
+if args.combo:
+    # Repair runs: check and submit only the named combos.
+    wanted = {tuple(c.split("/")) for c in args.combo}
+    bad = [c for c in wanted if len(c) != len(UNIQUE_KEYS)]
+    if bad:
+        raise SystemExit(f"--combo must be SOURCE/VARIANT/EXPERIMENT/BATCH_YEAR/BASIN, got {bad}")
+    keys = final_long[UNIQUE_KEYS].apply(tuple, axis=1)
+    unknown = wanted - set(keys)
     if unknown:
-        raise ValueError(f"No stage 3 resources for basin(s) {sorted(unknown)}")
-    df["num_cores"] = DEFAULT_NUM_CORES
-    df["memory_gb"] = df["basin"].map(lambda b: _BASIN_RESOURCES[b][0]).astype(int)
-    df["max_run_time"] = df["basin"].map(lambda b: _BASIN_RESOURCES[b][1]).astype(int)
-    print(
-        f"Memory range: {df['memory_gb'].min()}G-{df['memory_gb'].max()}G | "
-        f"Runtime: {df['max_run_time'].min()}-{df['max_run_time'].max()} min"
-    )
-    return df
-
-
-meta_df = pd.read_parquet(META_PARQUET)
-
-# The parquet contains metrics for 8 representative draws (one per unique
-# source_id/variant_label). Propagate those metrics to all 100 storm draws
-# by joining the full storm draw table on the 5-tuple keys.
-_metrics_df = meta_df[UNIQUE_KEYS + METRIC_COLS].drop_duplicates(subset=UNIQUE_KEYS)
-_storm_draw_df = pd.read_csv(STORM_DRAW_TABLE_PATH)
-_storm_draw_df["storm_draw"] = _storm_draw_df["storm_draw"].apply(lambda x: f"storm_draw_{x:04d}")
-_task_combos = meta_df[UNIQUE_KEYS].drop_duplicates()
-
-full_tasks_df = (
-    _storm_draw_df
-    .merge(_task_combos, on=["source_id", "variant_label"], how="inner")
-    .merge(_metrics_df, on=UNIQUE_KEYS, how="left")
-)
-print(f"Task list: {len(full_tasks_df)} rows across {full_tasks_df['storm_draw'].nunique()} storm draws.")
-
-full_tasks_df = assign_resources(full_tasks_df)
-
-# order tasks
-combo_cols = ["source_id", "variant_label"]
-
-full_tasks_df["draw_rank_within_model"] = (
-    full_tasks_df
-    .sort_values("storm_draw")
-    .groupby(combo_cols)["storm_draw"]
-    .rank(method="dense")
-    .astype(int)
-)
-full_tasks_df = full_tasks_df.sort_values(
-    [
-        "draw_rank_within_model",  # round-robin across models
-        "source_id",
-        "variant_label",
-        "storm_draw",
-        "experiment_id",
-        "batch_year",
-        "basin",
-    ]
-).reset_index(drop=True)
-
-##################
-# High-priority storm_draws (kept in priority order for queue placement).
-PRIORITY_DRAWS = [
-    "storm_draw_0001",
-    "storm_draw_0002",
-    "storm_draw_0003",
-    "storm_draw_0009",
-    "storm_draw_0013",
-    "storm_draw_0050",
-    "storm_draw_0057",
-    "storm_draw_0081",
-]
-
-# Which subset of storm_draws to submit:
-#   "non_priority" — submit everything EXCEPT PRIORITY_DRAWS (default state)
-#   "priority"     — submit ONLY PRIORITY_DRAWS (for testing / smoke runs)
-#   "all"          — submit every storm_draw, priority ones first
-PRIORITY_MODE = "all"
-
-if PRIORITY_MODE == "non_priority":
-    full_tasks_df = full_tasks_df[~full_tasks_df["storm_draw"].isin(PRIORITY_DRAWS)]
-elif PRIORITY_MODE == "priority":
-    full_tasks_df = full_tasks_df[full_tasks_df["storm_draw"].isin(PRIORITY_DRAWS)]
-elif PRIORITY_MODE == "all":
-    pass  # keep everything, priority-ordered by the upstream sort
-else:
-    raise ValueError(
-        f"Invalid PRIORITY_MODE={PRIORITY_MODE!r}; "
-        f"expected one of: 'non_priority', 'priority', 'all'."
-    )
-
-########################################################
-# Fan out (indirect_resp_draw, indirect_cvd_draw) into separate rows.
-rr_cols = ["indirect_cvd_draw", "indirect_resp_draw"]
-
-final_long = full_tasks_df.melt(
-    id_vars=[
-        "source_id",
-        "variant_label",
-        "experiment_id",
-        "batch_year",
-        "basin",
-        "storm_draw",
-        "max_run_time",
-        "memory_gb",
-        "num_cores",
-    ],
-    value_vars=rr_cols,
-    var_name="relative_risk",
-    value_name="sample_name",
-)
+        raise SystemExit(f"--combo not in the task list: {sorted(unknown)}")
+    final_long = final_long[keys.isin(wanted)]
 
 ############################################################################################
-# Completion derivation (filesystem-based, not Jobmon-based).
-#
-# A stage-3 task writes one paf parquet per year in batch_year. A task is
-# complete iff every year's parquet exists and is at least 1 KB. Mirrors
-# stage 2's launcher pattern. This also fixes a latent merge bug in the
-# prior Jobmon-based completion: the old merge on= list omitted sample_name,
-# so any one completed sample for a 7-tuple silently marked all other
-# samples for the same 7-tuple as done. task_is_complete keys on the full
-# 8-tuple, so each sample is now evaluated independently.
-completed_mask = final_long.apply(task_is_complete, axis=1)
-remaining_long = final_long[~completed_mask].copy()
-print(
-    f"Completion scan: {completed_mask.sum()} / {len(final_long)} tasks "
-    f"already done on disk; {len(remaining_long)} tasks to submit."
+# Completion derivation (filesystem-based): submit a (combo, year) if any of its
+# (storm draw, cause) outputs is missing; the worker computes only those.
+# Each check is one NFS round trip (~15 ms), so the scan runs in threads.
+combos = final_long.groupby(UNIQUE_KEYS, sort=False)
+combo_years = [
+    (key, rows, year)
+    for key, rows in combos
+    for year in range(int(key[3][:4]), int(key[3][5:]) + 1)
+]
+with ThreadPoolExecutor(max_workers=32) as pool:
+    done_flags = list(pool.map(lambda kry: combo_year_is_complete(kry[1], kry[2]), combo_years))
+remaining = pd.DataFrame(
+    [(*key, year, len(rows)) for (key, rows, year), done in zip(combo_years, done_flags) if not done],
+    columns=UNIQUE_KEYS + ["year", "n_jobs"],
 )
+print(f"Completion scan: {len(combo_years) - len(remaining)} / {len(combo_years)} (combo, year) pairs "
+      f"already done on disk; {len(remaining)} to submit ({remaining[UNIQUE_KEYS].drop_duplicates().shape[0]} combos).")
 
-# Format memory as a "{int}G" string for Jobmon's resource spec at the very
-# last moment (kept as int up to this point for clean arithmetic).
-remaining_long["memory_req"] = remaining_long["memory_gb"].astype(str) + "G"
+if args.pilot:
+    per_basin = max(1, -(-args.pilot // max(remaining["basin"].nunique(), 1)))
+    remaining = (
+        remaining.groupby("basin", group_keys=False)
+        .apply(lambda g: g.sample(min(len(g), per_basin), random_state=0))
+        .reset_index(drop=True)
+    )
+    print(f"PILOT: {len(remaining)} (combo, year) tasks (by basin: {remaining['basin'].value_counts().to_dict()}; "
+          f"by model: {remaining['source_id'].value_counts().to_dict()})")
+
+unknown = set(remaining["basin"]) - set(_BASIN_RESOURCES)
+if unknown:
+    raise ValueError(f"No stage 3 resources for basin(s) {sorted(unknown)}")
+remaining["memory_gb"] = remaining["basin"].map(lambda b: _BASIN_RESOURCES[b][0]).astype(int)
+# Runtime of a (combo, year): a shared part (reading and masking the population
+# windows, ~2/3 of a v2 per-job year) plus a per-job part (each job's PAF
+# resampled to the 100 m grid, ~1/3), from profiling an SP admin 0 combo-year
+# (6 jobs: 200 s shared + ~95 s per job). v2 per-job runtime covered 5 years.
+per_job_year = remaining["basin"].map(lambda b: _BASIN_RESOURCES[b][1] / 5)
+remaining["runtime_min"] = (
+    (args.runtime_factor * per_job_year * (0.67 + 0.33 * remaining["n_jobs"]))
+    .clip(lower=10).round(-1).astype(int)
+)
 
 ###############################################################
 project = "proj_rapidresponse"
@@ -260,15 +196,11 @@ MAIN_SCRIPT = Path(__file__).resolve().parent / "03_admin_level_paf_main.py"
 
 tool = Tool(name=f"CLIMADA_stage3_admin{ADMIN_LEVEL}")
 
-
-# Create a workflow, and set the executor
 workflow = tool.create_workflow(
-    name=f"CLIMADA_stage3_admin{ADMIN_LEVEL}_{wf_uuid}",
-    # max_concurrently_running = 100,
+    name=f"CLIMADA_stage3_admin{ADMIN_LEVEL}_combo_{'pilot_' if args.pilot else ''}{wf_uuid}",
+    max_concurrently_running=args.max_concurrent,
 )
 
-
-# Set resources on the workflow
 workflow.set_default_compute_resources_from_dict(
     cluster_name="slurm",
     dictionary={
@@ -281,23 +213,16 @@ workflow.set_default_compute_resources_from_dict(
     }
 )
 
-
-# Get unique combinations of runtime, cores, and memory
-unique_configs = remaining_long[['max_run_time', 'num_cores', 'memory_req']].drop_duplicates()
-
-# Create task templates for each unique configuration
 task_templates = {}
-for _, config in unique_configs.iterrows():
-    config_key = f"{config['max_run_time']}_{config['num_cores']}_{config['memory_req']}"
-    
-    task_templates[config_key] = tool.get_task_template(
-        template_name=f"CLIMADA_stage3_admin{ADMIN_LEVEL}_{config_key}",
+for (memory_gb, runtime_min), _ in remaining.groupby(["memory_gb", "runtime_min"]):
+    task_templates[(memory_gb, runtime_min)] = tool.get_task_template(
+        template_name=f"CLIMADA_stage3_admin{ADMIN_LEVEL}_combo_{runtime_min}m_{args.cores}c_{memory_gb}G",
         default_cluster_name="slurm",
         default_compute_resources={
             "queue": "all.q",
-            "cores": config['num_cores'],
-            "memory": config['memory_req'],
-            "runtime": f"{int(config['max_run_time'])}m",
+            "cores": args.cores,
+            "memory": f"{memory_gb}G",
+            "runtime": f"{runtime_min}m",
             "project": project,
         },
         default_resource_scales={
@@ -307,67 +232,53 @@ for _, config in unique_configs.iterrows():
         max_attempts=5,
         command_template=(
             f"python {MAIN_SCRIPT} "
-            "--storm_draw {storm_draw} "
             "--source_id {source_id} "
             "--variant_label {variant_label} "
             "--experiment_id {experiment_id} "
             "--batch_year {batch_year} "
             "--basin {basin} "
-            "--relative_risk {relative_risk} "
-            "--sample_name {sample_name} "
+            "--year {year} "
             "--num_cores {num_cores} "
             f"--admin_level {ADMIN_LEVEL}"
         ),
-        node_args=["storm_draw", "source_id", "variant_label", "experiment_id", "batch_year", "basin", "relative_risk", "sample_name", "num_cores"],
+        node_args=["source_id", "variant_label", "experiment_id", "batch_year", "basin", "year", "num_cores"],
         task_args=[],
         op_args=[],
     )
 
-# Create tasks using the appropriate template
-tasks = []
-for row in remaining_long.itertuples():
-    config_key = f"{row.max_run_time}_{row.num_cores}_{row.memory_req}"
-    template = task_templates[config_key]
-
-    task = template.create_task(
+tasks = [
+    task_templates[(row.memory_gb, row.runtime_min)].create_task(
         name=(
-            f"CLIMADA_stage3_a{ADMIN_LEVEL}_"
-            f"sd{row.storm_draw}_"
-            f"src{row.source_id}_"
-            f"var{row.variant_label}_"
-            f"exp{row.experiment_id}_"
-            f"yr{row.batch_year}_"
-            f"{row.basin}_"
-            f"{row.relative_risk}_"
-            f"s{row.sample_name}_"
-            f"rt{row.max_run_time}m_"
-            f"mem{row.memory_req}_"
-            f"c{row.num_cores}"
+            f"CLIMADA_stage3_a{ADMIN_LEVEL}_{row.source_id}_{row.variant_label}_"
+            f"{row.experiment_id}_{row.batch_year}_{row.basin}_{row.year}"
         ),
-        storm_draw=row.storm_draw,
         source_id=row.source_id,
         variant_label=row.variant_label,
         experiment_id=row.experiment_id,
         batch_year=row.batch_year,
         basin=row.basin,
-        relative_risk=row.relative_risk,
-        sample_name=row.sample_name,
-        num_cores=row.num_cores,
+        year=row.year,
+        num_cores=args.cores,
     )
+    for row in remaining.itertuples(index=False)
+]
 
-    tasks.append(task)
+print(f"Number of tasks: {len(tasks)} ({args.cores} core(s), at most {args.max_concurrent} at once); "
+      f"memory GB and runtime min (min-max) by basin:")
+print(remaining.groupby("basin").agg(memory_gb=("memory_gb", "first"), runtime_min=("runtime_min", "min"),
+                                     runtime_max=("runtime_min", "max"), tasks=("year", "size")).to_string())
 
-print(f"Number of tasks: {len(tasks)}")
-print(f"Number of task templates created: {len(task_templates)}")
-
-
-###################################################################
+if args.dry_run:
+    print("DRY RUN: not binding or submitting. (combo, year) tasks that would run:")
+    print(remaining.groupby(["basin", "source_id"]).size().unstack(fill_value=0).to_string())
+    raise SystemExit(0)
 
 if tasks:
     workflow.add_tasks(tasks)
     print("✅ Tasks successfully added to workflow.")
 else:
-    print("⚠️ No tasks added to workflow. Check task generation.")
+    print("⚠️ No tasks added to workflow.")
+    raise SystemExit(0)
 
 try:
     workflow.bind()
