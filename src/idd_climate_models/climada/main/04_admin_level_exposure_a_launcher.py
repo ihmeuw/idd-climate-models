@@ -15,6 +15,8 @@ from stage1_run_config import require_stage1_complete
 parser = argparse.ArgumentParser(description="Launch stage 4A for one or both admin levels")
 parser.add_argument("--admin_levels", type=int, nargs="+", default=[0, 1], choices=[0, 1],
                     help="levels to run, in order (default: 0 then 1)")
+parser.add_argument("--max_concurrent", type=int, default=300,
+                    help="max tasks running at once (caps the load on the shared filesystem)")
 args = parser.parse_args()
 ADMIN_LEVELS = list(dict.fromkeys(args.admin_levels))
 
@@ -170,7 +172,7 @@ tool = Tool(name="CLIMADA_stage4a")
 levels_name = "_".join(f"admin{level}" for level in ADMIN_LEVELS)
 workflow = tool.create_workflow(
     name=f"CLIMADA_stage4a_{levels_name}_{wf_uuid}",
-    max_concurrently_running=3000,
+    max_concurrently_running=args.max_concurrent,
 )
 
 workflow.set_default_compute_resources_from_dict(
