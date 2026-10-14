@@ -214,6 +214,18 @@ central pressure needs replacing.
   (Indonesia only) 1.04x. Built/executed via esfg_env nbclient + temp kernelspec
   for climada_env (scratch).
 
+## Stage 4 (2026-10-14)
+- db83e16: 4A/4B rasterize each admin piece once (piece_mask/apply_mask), 4A caches
+  shapefile/pop per process; outputs identical (4A 67 parquets excl.
+  processing_time_seconds; 4B 11/11). 4A admin0 draw 215 -> 179 s.
+- f2d167d: 4A launcher --max_concurrent (default 300).
+- 4A LAUNCHED 07:58 detached: workflow 638708, 30,100 group tasks per level (admin 0
+  then admin 1), log climada_logs/stage4a_admin0_admin1_20261014_075854.log.
+  4B launches after 4A's resource assignment per level (ADMIN_LEVEL = 1 set).
+- Stage 3 at 08:00: admin1 16,926/16,968; admin0 1,650 done, ~450 running, median
+  100 min (NA 260 min, pinned at 53G; 9 timeouts retrying at 990 min); ~2.5 days
+  left. Interactive job 56876825 ends ~Oct 17 14:30 — relaunch launchers if needed.
+
 ## Next Steps
 1. Stage 2 (637740) finishing -> count tasks -> launch stage 3 admin 0 and
    admin 1 (ADMIN_LEVEL edited by hand in 03 launcher).
