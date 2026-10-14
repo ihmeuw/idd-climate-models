@@ -205,6 +205,15 @@ central pressure needs replacing.
   retries succeeded. Expect admin 1
   overnight; admin 0 ~30+ h at 300 concurrent (raise with jobmon workflow concurrency).
 
+## 2026-10-14 morning
+- Stage 3 at ~06:45: admin1 16,573/16,968 done, admin0 1,436 done, 0 fatal.
+- notebooks/2026_10_14_climada_v3_stage1_3.ipynb (gitignored, executed): v2 vs v3
+  stages 1-3 for CMCC-ESM2 r1 ssp245 2097-2100 AU 2097, storm_draw_0002, stage 1
+  storm_0001 draw 1. Stage 1 peak -6%, footprint -2%; stage 2 raster PAF sum 0.67x;
+  stage 3 admin0 PAF sum 1.03x (Australia -33%, NZ -27%, islands +10%), admin1
+  (Indonesia only) 1.04x. Built/executed via esfg_env nbclient + temp kernelspec
+  for climada_env (scratch).
+
 ## Next Steps
 1. Stage 2 (637740) finishing -> count tasks -> launch stage 3 admin 0 and
    admin 1 (ADMIN_LEVEL edited by hand in 03 launcher).
