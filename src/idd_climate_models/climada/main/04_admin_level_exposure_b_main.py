@@ -16,6 +16,7 @@ import traceback
 from rasterio.features import shapes, rasterize  # type: ignore
 from rasterio.errors import WindowError  # type: ignore
 from rasterra import RasterArray  # type: ignore
+from rasterra._array import raster_geometry_mask  # type: ignore
 import shapely
 import shapely.affinity  # type: ignore
 from shapely.geometry import (
@@ -271,6 +272,33 @@ def reproject_shapefile_to_equal_area(intersected_shapes):
     intersected_shapes = intersected_shapes.to_crs("ESRI:54034")
     intersected_shapes["geometry"] = intersected_shapes.geometry.apply(_polygonize)
     return intersected_shapes
+
+
+def piece_mask(raster, geom):
+    """Boolean mask (True = outside geom) of `raster.mask(geom, all_touched=True)`.
+
+    rasterra's mask depends only on the grid (transform, shape), the geometry and
+    all_touched, so a second raster on the same grid can reuse it via apply_mask
+    instead of rasterizing the piece again. Raises WindowError if geom misses the
+    grid, as mask() does.
+    """
+    height, width = raster._ndarray.shape
+    shape_mask, _, _ = raster_geometry_mask(
+        data_transform=raster.transform, data_width=width, data_height=height,
+        shapes=[geom], all_touched=True,
+    )
+    return shape_mask
+
+
+def apply_mask(raster, shape_mask):
+    """What RasterArray.mask does with a precomputed mask: copy, set no-data outside."""
+    if raster._no_data_value is None:
+        raise ValueError("No fill value is set.")
+    if raster._ndarray.shape != shape_mask.shape:
+        raise ValueError("mask and raster grids differ")
+    data = raster._ndarray.copy()
+    data[shape_mask] = raster.no_data_value
+    return RasterArray(data, raster.transform, raster._crs, no_data_value=raster.no_data_value)
 
 
 def clean_raster(raw_raster):
@@ -1292,7 +1320,9 @@ def process_single_storm(
                 # ----------------------------
                 try:
                     pop_piece = load_in_gridded_population(year, 100, bounds=intersection_cea_bounds)
-                    pop_piece_masked = pop_piece.mask(piece_cea, all_touched=True)
+                    # rasterize the piece once; the exposure below is masked on the same grid
+                    shape_mask = piece_mask(pop_piece, piece_cea)
+                    pop_piece_masked = apply_mask(pop_piece, shape_mask)
                     del pop_piece  # free unmasked copy; pop_piece_masked is sufficient
                 except WindowError:
                     print(f"[INFO] Admin piece does not intersect population raster → skipping piece")
@@ -1306,7 +1336,7 @@ def process_single_storm(
                 pop_arr = pop_piece_masked._ndarray.astype(np.float32, copy=False)
                 exposure_resampled = admin_exposure.resample_to(pop_piece_masked, resampling="nearest")
                 del admin_exposure  # no longer needed; exposure_resampled holds the resampled data
-                exposure_resampled = exposure_resampled.mask(piece_cea, all_touched=True)
+                exposure_resampled = apply_mask(exposure_resampled, shape_mask)
                 exposure_arr = exposure_resampled._ndarray.astype(np.float32, copy=False)
 
                 # Single boolean array instead of three to reduce peak by ~2x bool-array footprint

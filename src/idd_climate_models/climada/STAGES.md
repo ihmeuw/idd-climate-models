@@ -1591,6 +1591,29 @@ ported to `/ibtracs/`.
   `end_date` year; 4B uses the `start_date` year only. No sampled storm spans
   two years, so the two agree in practice.
 
+### Efficiency changes (2026-10-13/14)
+
+Stage 4 has no cause / RR-sample dimension, so unlike stages 2–3 no task
+re-reads another task's storms or population windows. Changes, all with
+identical outputs:
+
+- Stage 1 storms opened with `zarr_format=3`, dates from the group's
+  `zarr.json`, chunks through `open_storm` (`storm_zarr.py`); `gdal_env` sets
+  `GDAL_DATA`/`PROJ_DATA` (see Stage 2 → Filesystem reads).
+- 4A and 4B load the admin shapefile and population totals once per process
+  (`functools.lru_cache`); before, 4A read them for every draw (12 per task) and
+  4B for every (storm, location) row.
+- 4B keeps the last storm's cleaned intensity/exposure rasters
+  (`prepare_storm_rasters`) and sorts a group's rows by storm.
+- Each admin piece is rasterized once (`piece_mask` + `apply_mask`): the
+  population window and the exposure resampled onto that window's grid are both
+  masked with it. rasterra's `mask()` depends only on the grid, geometry and
+  `all_touched`, so this equals masking each raster.
+
+Tested on stage1_v3: 4A one AU draw, old vs new code — admin 0 215 → 179 s,
+admin 1 20 → 17 s, all 67 parquets identical except `processing_time_seconds`;
+4B 13 admin 1 rows (AU/NA) — 11/11 records identical.
+
 ### Part A — Per-(storm, admin) metadata-gathering pass
 
 #### Purpose
