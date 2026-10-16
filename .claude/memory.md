@@ -226,6 +226,18 @@ central pressure needs replacing.
   100 min (NA 260 min, pinned at 53G; 9 timeouts retrying at 990 min); ~2.5 days
   left. Interactive job 56876825 ends ~Oct 17 14:30 — relaunch launchers if needed.
 
+## 2026-10-16: node failure + resume
+- Old interactive job 56876825 hit NODE_FAIL 2026-10-14 22:25 -> both launchers died
+  (also Jobmon server MySQL 500 errors then). Workflows 638563 (stage3 a0, 3,947 done)
+  and 638708 (4A, 8,772 done, 1 fatal) FAILED; 638562 (stage3 a1) DONE.
+- 4A fatal group 4019 = damaged stage1 EXPOSURE group EC-Earth3 r1 historical 1980-1984
+  WP draw 33 (_e32) storm_0125 (written 2026-10-11 19:25, same incident). Regenerated,
+  verified (intensity + landfall identical), user swapped in. Scan of both affected
+  combos (54,450 storm groups): no other damage.
+- Resumed via sbatch long.q clients (climada_logs/jobmon_resume.sbatch, hot resume,
+  --execution-timeout 11 days): stage3 a0 = job 58307814 (wf run 416607),
+  4A = job 58308078. New interactive job 58307758 (p0005) ends Oct 21.
+
 ## Next Steps
 1. Stage 2 (637740) finishing -> count tasks -> launch stage 3 admin 0 and
    admin 1 (ADMIN_LEVEL edited by hand in 03 launcher).
